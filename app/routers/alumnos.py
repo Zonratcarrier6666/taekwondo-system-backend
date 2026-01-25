@@ -1,29 +1,32 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 from app.database import supabase
-from app.schemas import AlumnoCreate
+from app.schemas.alumnos import AlumnoCreate
+from typing import Optional
 
 router = APIRouter(prefix="/alumnos", tags=["Alumnos"])
 
 @router.get("/")
-def listar_alumnos():
-    """Obtiene todos los alumnos registrados."""
+def listar_alumnos(idescuela: Optional[int] = None):
+    """Obtiene los alumnos. Si se pasa idescuela, filtra por ella."""
     try:
-        res = supabase.table("alumnos").select("*").execute()
+        query = supabase.table("alumnos").select("*")
+        if idescuela:
+            query = query.eq("idescuela", idescuela)
+        res = query.execute()
         return res.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/", status_code=201)
+@router.post("/", status_code=status.HTTP_201_CREATED)
 async def registrar_alumno(alumno: AlumnoCreate):
-    """Crea un nuevo alumno vinculándolo a una escuela."""
+    """Crea un nuevo alumno incluyendo su ficha médica."""
     try:
-        # Usamos mode="json" para serializar las fechas correctamente
         datos = alumno.model_dump(mode="json")
         res = supabase.table("alumnos").insert(datos).execute()
         
         if not res.data:
-            raise HTTPException(status_code=400, detail="No se pudo registrar el alumno")
+            raise HTTPException(status_code=400, detail="Error al registrar en la base de datos")
             
-        return {"status": "success", "alumno": res.data[0]}
+        return {"status": "success", "message": "Alumno y ficha médica creados", "alumno": res.data[0]}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

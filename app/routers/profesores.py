@@ -1,53 +1,51 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 from app.database import supabase
-from app.schemas import ProfesorCreate
+from app.schemas.profesores import ProfesorCreate
+from app.utils.security import obtener_password_hash # Importación necesaria
 from typing import Optional
-
 
 router = APIRouter(prefix="/profesores", tags=["Profesores"])
 
-@router.get("/")
-def listar_profesores(idescuela: Optional[int] = None):
-    """Lista todos los profesores o los filtra por escuela."""
-    try:
-        query = supabase.table("profesores").select("*, cintasgrados(color, nivelkupdan)")
-        if idescuela:
-            query = query.eq("idescuela", idescuela)
-        
-        res = query.execute()
-        return res.data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/", status_code=201)
+@router.post("/", status_code=status.HTTP_201_CREATED)
 async def registrar_profesor(datos: ProfesorCreate):
-    """Crea un usuario y un registro de profesor vinculado a una escuela."""
+    """Registra un profesor y encripta su contraseña correctamente."""
     try:
-        # 1. Crear el usuario con rol 'Profesor'
+        # 1. Creamos el usuario con el hash de la contraseña
+        # Antes se guardaba 'datos.password' directo, ahora usamos la utilidad
         user_data = {
             "username": datos.username,
-            "passwordhash": datos.password, # TODO: Hash password
+            "passwordhash": obtener_password_hash(datos.password),
             "rol": "Profesor"
         }
         res_user = supabase.table("usuarios").insert(user_data).execute()
-        if not res_user.data:
-            raise HTTPException(status_code=400, detail="Error al crear usuario para el profesor")
         
+        if not res_user.data:
+            raise HTTPException(status_code=400, detail="No se pudo crear el acceso")
+            
         id_usuario = res_user.data[0]["idusuario"]
 
-        # 2. Crear el registro del profesor
+        # 2. Vinculamos al profesor con su nueva ID de usuario
         profesor_data = {
             "nombrecompleto": datos.nombrecompleto,
             "idgradodan": datos.idgradodan,
             "idescuela": datos.idescuela,
             "idusuario": id_usuario,
-            "estatus": 1
+            "estatus": datos.estatus
         }
         res_prof = supabase.table("profesores").insert(profesor_data).execute()
         
-        return {
-            "message": "Profesor dado de alta exitosamente",
-            "data": res_prof.data[0]
-        }
+        return {"message": "Profesor registrado con éxito y contraseña blindada", "data": res_prof.data[0]}
+    
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/")
+def listar_profesores(idescuela: Optional[int] = None):
+    try:
+        query = supabase.table("profesores").select("*, cintasgrados(color, nivelkupdan)")
+        if idescuela:
+            query = query.eq("idescuela", idescuela)
+        res = query.execute()
+        return res.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
