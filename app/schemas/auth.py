@@ -1,15 +1,15 @@
 from pydantic import BaseModel
 from typing import Optional
 
-class RegistroEscuelaMaestro(BaseModel):
-    # Datos de Usuario Admin
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user_role: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+    role: Optional[str] = None
+
+class LoginRequest(BaseModel):
     username: str
     password: str
-    
-    # Datos de la Institución
-    nombre_escuela: str
-    direccion: Optional[str] = None
-    
-    # Datos del Profesor Principal
-    nombre_completo_profesor: str
-    id_grado_dan: int

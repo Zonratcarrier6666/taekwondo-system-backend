@@ -1,77 +1,128 @@
-from fastapi import APIRouter, HTTPException, Header, status
-from app.database import supabase
-from app.schemas.usuarios import RegistroEscuela, RegistroProfesor, RegistroJuez, UserRole
-from app.utils.security import obtener_password_hash
-from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status
+from supabase import Client
+from typing import List
+
+from app.utils.database import get_db
+from app.utils.security import get_password_hash
+from app.utils.auth_utils import get_current_user
+from app.schemas.usuarios import (
+    Usuario, UserRole, RegistroEscuelaCompleto, RegistroProfesorCompleto
+)
 
 router = APIRouter(prefix="/usuarios", tags=["Gestión de Usuarios"])
 
-@router.post("/registrar-escuela", status_code=status.HTTP_201_CREATED)
-async def crear_escuela(datos: RegistroEscuela, x_user_role: str = Header(...)):
-    """Registro de Escuela con sistema de Paletas y Hash de password."""
-    if x_user_role != UserRole.SuperAdmin:
+@router.post("/registrar-escuela", response_model=Usuario, status_code=status.HTTP_201_CREATED)
+async def registrar_escuela(
+    datos: RegistroEscuelaCompleto, 
+    current_user: dict = Depends(get_current_user),
+    db: Client = Depends(get_db)
+):
+    """
+    Jerarquía: Solo el SuperAdmin puede crear usuarios de tipo Escuela.
+    """
+    # Verificamos el rol del usuario que hace la petición
+    if current_user.get("rol") != UserRole.SUPERADMIN:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
-            detail="Operación exclusiva para el SuperAdmin."
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permisos insuficientes. Tu rol es {current_user.get('rol')}, pero se requiere SuperAdmin."
         )
-    
+
+    # 1. Crear Usuario base
+    password_hash = get_password_hash(datos.password)
+    user_payload = {
+        "username": datos.username,
+        "passwordhash": password_hash,
+        "rol": UserRole.ESCUELA.value
+    }
+
     try:
-        # 1. Encriptar contraseña
-        password_hasheada = obtener_password_hash(datos.password)
-        
-        # 2. Insertar en tabla Usuarios
-        user_res = supabase.table("usuarios").insert({
-            "username": datos.username,
-            "passwordhash": password_hasheada,
-            "rol": UserRole.Escuela
-        }).execute()
-        
+        # Insertar en la tabla 'usuarios'
+        user_res = db.table("usuarios").insert(user_payload).execute()
         if not user_res.data:
-            raise HTTPException(status_code=400, detail="Error al crear usuario de acceso.")
+            raise Exception("No se pudo crear el usuario base.")
             
-        id_usuario = user_res.data[0]["idusuario"]
-        
-        # 3. Insertar en tabla DatosEscuela con el campo color_paleta
-        escuela_res = supabase.table("datosescuela").insert({
-            "idusuario": id_usuario,
+        new_user = user_res.data[0]
+        id_creado = new_user["idusuario"]
+
+        # 2. Crear Perfil de Escuela vinculado
+        escuela_payload = {
+            "idusuario": id_creado,
             "nombreescuela": datos.nombre_escuela,
             "direccion": datos.direccion,
             "lema": datos.lema,
-            "telefono_oficina": datos.telefono_oficina,
-            "color_paleta": datos.color_paleta # Nuevo campo sincronizado con la BD
-        }).execute()
-        
-        return {
-            "message": "Escuela registrada exitosamente", 
-            "escuela": escuela_res.data[0],
-            "paleta_asignada": datos.color_paleta
+            "telefono_oficina": datos.telefono_oficina
         }
-    
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        
+        db.table("datosescuela").insert(escuela_payload).execute()
+        
+        return new_user
 
-@router.post("/registrar-profesor")
-async def crear_profesor(datos: RegistroProfesor, x_user_role: str = Header(...)):
-    """Registro de profesor con validación de seguridad y hash."""
-    if x_user_role not in [UserRole.SuperAdmin, UserRole.Escuela]:
-        raise HTTPException(status_code=403, detail="No tienes permisos para registrar staff.")
+    except Exception as e:
+        print(f"Error DETALLADO en registrar_escuela: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Error en base de datos: {str(e)}"
+        )
+
+@router.post("/registrar-profesor", response_model=Usuario, status_code=status.HTTP_201_CREATED)
+async def registrar_profesor(
+    datos: RegistroProfesorCompleto, 
+    current_user: dict = Depends(get_current_user),
+    db: Client = Depends(get_db)
+):
+    """
+    Jerarquía: Solo una Escuela puede crear Profesores.
+    El profesor se vincula automáticamente a la escuela del usuario creador.
+    """
+    # Validar que quien crea sea una Escuela
+    if current_user.get("rol") != UserRole.ESCUELA:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los usuarios con rol Escuela pueden registrar profesores."
+        )
+
+    # Buscar la idescuela del usuario 'Escuela' que está autenticado
+    id_usuario_escuela = current_user.get("idusuario")
+    escuela_res = db.table("datosescuela").select("idescuela").eq("idusuario", id_usuario_escuela).execute()
+    
+    if not escuela_res.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No se encontró un perfil de escuela asociado a tu cuenta."
+        )
+    
+    id_escuela_vinculada = escuela_res.data[0]["idescuela"]
+
+    # 1. Crear Usuario Profesor
+    password_hash = get_password_hash(datos.password)
+    user_payload = {
+        "username": datos.username,
+        "passwordhash": password_hash,
+        "rol": UserRole.PROFESOR.value
+    }
 
     try:
-        user_res = supabase.table("usuarios").insert({
-            "username": datos.username,
-            "passwordhash": obtener_password_hash(datos.password),
-            "rol": UserRole.Profesor
-        }).execute()
+        user_res = db.table("usuarios").insert(user_payload).execute()
+        if not user_res.data:
+            raise Exception("Error al crear la cuenta de usuario para el profesor.")
+            
+        new_user = user_res.data[0]
+
+        # 2. Crear Perfil de Profesor vinculado a la escuela
+        prof_payload = {
+            "idusuario": new_user["idusuario"],
+            "idescuela": id_escuela_vinculada,
+            "nombrecompleto": datos.nombre_completo,
+            "idgradodan": datos.idgradodan
+        }
         
-        id_usuario = user_res.data[0]["idusuario"]
+        db.table("profesores").insert(prof_payload).execute()
         
-        prof_res = supabase.table("profesores").insert({
-            "idusuario": id_usuario,
-            "idescuela": datos.id_escuela,
-            "idgradodan": datos.id_grado_dan,
-            "nombrecompleto": datos.nombre_completo
-        }).execute()
-        
-        return {"message": "Profesor registrado y vinculado correctamente.", "data": prof_res.data[0]}
+        return new_user
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"Error DETALLADO en registrar_profesor: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al vincular profesor: {str(e)}"
+        )

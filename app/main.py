@@ -1,47 +1,70 @@
 from fastapi import FastAPI
-# Importamos los routers de cada módulo
-from app.routers.auth import router as auth_router
-from app.routers.usuarios import router as usuarios_router
-from app.routers.alumnos import router as alumnos_router
-from app.routers.profesores import router as profesores_router
-from app.routers.catalogos import router as catalogos_router
-from app.routers.torneos import router as torneos_router
+from fastapi.middleware.cors import CORSMiddleware
+from .routers import auth, usuarios, alumnos, torneos, profesores, escuelas, cintagrados, examen
+
+# Definición de etiquetas para organizar el orden en Swagger
+tags_metadata = [
+    {
+        "name": "Autenticación",
+        "description": "Operaciones de inicio de sesión y obtención de tokens JWT.",
+    },
+    {
+        "name": "Gestión de Usuarios",
+        "description": "Administración de cuentas y jerarquía de creación de perfiles.",
+    },
+    {
+        "name": "Gestión de Alumnos",
+        "description": "Registro de alumnos con **asignación automática** de Escuela y Profesor según el token.",
+    },
+    {
+        "name": "Gestión de Torneos",
+        "description": "Configuración de eventos, categorías e inscripciones.",
+    },
+]
 
 app = FastAPI(
-    title="Taekwondo Management & Tournament System",
-    description="API modular para la gestión integral de escuelas de Taekwondo y organización de torneos con brackets en vivo.",
-    version="2.1.0"
+    title="Taekwondo Management System API",
+    description="""
+    API robusta para la gestión integral de torneos y escuelas de Taekwondo.
+    
+    ### Comportamiento Predictivo (Auto-asignación):
+    Esta API utiliza el token de seguridad para identificar al usuario y automatizar el flujo de datos:
+    * **Registro de Escuela**: Solo el SuperAdmin puede hacerlo.
+    * **Registro de Profesor**: El sistema detecta la Escuela del usuario logueado y vincula al profesor automáticamente.
+    * **Registro de Alumno**: 
+        - Si eres **Profesor**, el sistema detecta tu `idprofesor` y tu `idescuela` y los asigna al alumno.
+        - Si eres **Escuela**, el sistema detecta tu `idescuela` y la asigna. Puedes asignar un profesor opcionalmente.
+    
+    ### Seguridad:
+    Utiliza el botón **Authorize** con un token válido para probar los endpoints protegidos.
+    """,
+    version="1.1.0",
+    openapi_tags=tags_metadata,
+    contact={
+        "name": "Soporte Técnico",
+        "email": "soporte@tkdsystem.com",
+    },
 )
 
-# --- REGISTRO DE ROUTERS ---
+# Configuración de CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Autenticación y Login
-app.include_router(auth_router)
-
-# Gestión de Usuarios y Roles (SuperAdmin, Escuela, Profesor, Juez)
-app.include_router(usuarios_router)
-
-# Gestión de Alumnos e Información Médica
-app.include_router(alumnos_router)
-
-# Gestión de Profesores y Staff
-app.include_router(profesores_router)
-
-# Módulo de Torneos, Categorías y Brackets
-app.include_router(torneos_router)
-
-# Catálogos (Cintas, Grados, etc.)
-app.include_router(catalogos_router)
-
-
-# --- RUTAS GENERALES ---
+# Inclusión de Routers
+app.include_router(auth.router, prefix="/auth", tags=["Autenticación"])
+app.include_router(usuarios.router, prefix="/usuarios", tags=["Gestión de Usuarios"])
+app.include_router(alumnos.router, prefix="/alumnos", tags=["Gestión de Alumnos"])
+app.include_router(torneos.router, prefix="/torneos", tags=["Gestión de Torneos"])
+app.include_router(profesores.router, prefix="/profesores", tags=["Gestión de Profesores"])
+app.include_router(escuelas.router, prefix="/escuelas", tags=["Gestión de la Escuela"])
+app.include_router(cintagrados.router, prefix="/grados", tags=["Cintas y Grados"])
+app.include_router(examen.router, prefix="/examenes", tags=["Gestión de Exámenes"])
 
 @app.get("/", tags=["General"])
-def root():
-    """Ruta de bienvenida y verificación de estado."""
-    return {
-        "app": "Taekwondo System API",
-        "version": "2.1.0",
-        "status": "Online",
-        "docs": "/docs"
-    }
+async def root():
+    return {"message": "TKD API is running"}
