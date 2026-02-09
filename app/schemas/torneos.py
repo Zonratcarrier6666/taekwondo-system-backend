@@ -1,74 +1,52 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List, Any
 from datetime import date, datetime
 
-# --- Torneo ---
+# --- Esquemas para Torneos (Tabla public.torneos) ---
+
 class TorneoBase(BaseModel):
-    nombre: str
+    nombre: str = Field(..., examples=["Open Nacional de Taekwondo 2026"])
     fecha: date
-    sede: str
-    modalidades: Optional[Any] = None # JSONB en SQL
-    estatus: Optional[int] = 1
+    sede: str = Field(..., examples=["Auditorio Municipal, CDMX"])
+    modalidades: Optional[dict] = Field(default=None, description="JSON con modalidades: Combate, Poomsae, etc.")
+    costo_inscripcion: float = Field(default=0.0, gt=-1) # Aunque no se ve en la foto, lo mantenemos para finanzas
+    estatus: int = Field(default=1, description="1: Abierto, 2: En curso, 3: Finalizado, 0: Cancelado")
 
 class TorneoCreate(TorneoBase):
     pass
 
 class Torneo(TorneoBase):
     idtorneo: int
-    class Config:
-        from_attributes = True
+    fecharegistro: Optional[datetime] = None
+    model_config = ConfigDict(from_attributes=True)
 
-# --- Categoría ---
-class CategoriaBase(BaseModel):
+# --- Esquemas para Categorías (Tabla public.torneo_categorias) ---
+
+class CategoriaTorneoBase(BaseModel):
     idtorneo: int
-    nombre_categoria: str
-    edad_min: Optional[int] = None
-    edad_max: Optional[int] = None
-    peso_min: Optional[float] = None
-    peso_max: Optional[float] = None
-    grados_permitidos: List[int] = [] # ARRAY en SQL
-    genero: Optional[str] = None
+    nombre_categoria: str = Field(..., examples=["Juvenil Pesado Masculino"])
+    edad_min: int = Field(default=0)
+    edad_max: int = Field(default=99)
+    peso_min: float = Field(default=0.0)
+    peso_max: float = Field(default=999.0)
+    grados_permitidos: List[int] = Field(default=[], description="Array de IDs de cintas permitidas")
+    genero: str = Field(..., examples=["Masculino", "Femenino", "Mixto"])
 
-class CategoriaCreate(CategoriaBase):
+class CategoriaTorneoCreate(CategoriaTorneoBase):
     pass
 
-# --- Inscripción ---
-class InscripcionBase(BaseModel):
-    idtorneo: int
+class CategoriaTorneo(CategoriaTorneoBase):
+    idcategoria: int
+    model_config = ConfigDict(from_attributes=True)
+
+# --- Esquema para Inscripción ---
+
+class AlumnoInscripcion(BaseModel):
+    """Datos mínimos para inscribir a un alumno."""
     idalumno: int
-    idprofesor: int
     idcategoria: int
-    peso_declarado: float
-    edad_al_momento: int
+    peso_declarado: float = Field(..., gt=0, examples=[55.5])
 
-class InscripcionCreate(InscripcionBase):
-    pass
-
-class Inscripcion(InscripcionBase):
-    idinscripcion: int
-    token_qr: Optional[str] = None
-    estatus_pago: str
-    peso_bascula: Optional[float] = None
-    estatus_checkin: bool
-    fecha_inscripcion: datetime
-    class Config:
-        from_attributes = True
-
-# --- Combate (Bracket) ---
-class CombateBase(BaseModel):
-    idtorneo: int
-    idcategoria: int
-    ronda: int
-    area_asignada: Optional[str] = None
-
-class Combate(CombateBase):
-    idcombate: int
-    id_competidor_1: Optional[int] = None
-    id_competidor_2: Optional[int] = None
-    id_ganador: Optional[int] = None
-    puntos_c1: int = 0
-    puntos_c2: int = 0
-    id_combate_padre: Optional[int] = None
-    posicion_padre: Optional[str] = None
-    class Config:
-        from_attributes = True
+class InscripcionTorneo(BaseModel):
+    """Lista de alumnos a inscribir."""
+    inscripciones: List[AlumnoInscripcion]

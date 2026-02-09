@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import auth, usuarios, alumnos, torneos, profesores, escuelas, cintagrados, examen
+from .routers import auth, usuarios, alumnos, torneos, profesores, escuelas, cintagrados, examen, pagos, mensualidades,test_correos
 
 # Definición de etiquetas para organizar el orden en Swagger
 tags_metadata = [
@@ -56,14 +56,17 @@ app.add_middleware(
 )
 
 # Inclusión de Routers
-app.include_router(auth.router, prefix="/auth", tags=["Autenticación"])
-app.include_router(usuarios.router, prefix="/usuarios", tags=["Gestión de Usuarios"])
-app.include_router(alumnos.router, prefix="/alumnos", tags=["Gestión de Alumnos"])
-app.include_router(torneos.router, prefix="/torneos", tags=["Gestión de Torneos"])
-app.include_router(profesores.router, prefix="/profesores", tags=["Gestión de Profesores"])
-app.include_router(escuelas.router, prefix="/escuelas", tags=["Gestión de la Escuela"])
-app.include_router(cintagrados.router, prefix="/grados", tags=["Cintas y Grados"])
-app.include_router(examen.router, prefix="/examenes", tags=["Gestión de Exámenes"])
+app.include_router(auth.router, prefix="/auth", tags=["Autenticación (Escuelas y Profesores)"])
+app.include_router(usuarios.router, prefix="/usuarios", tags=["Gestión de Usuarios (SuperAdmin)"])
+app.include_router(alumnos.router, prefix="/alumnos", tags=["Gestión de Alumnos (Profesores y Escuelas)"])
+app.include_router(torneos.router, prefix="/torneos", tags=["Gestión de Torneos (Administrador, Escuelas, Profesores y juezes)"])
+app.include_router(profesores.router, prefix="/profesores", tags=["Gestión de Profesores (Escuelas)"])
+app.include_router(escuelas.router, prefix="/escuelas", tags=["Gestión de la Escuela (Escuelas)"])
+app.include_router(cintagrados.router, prefix="/grados", tags=["Cintas y Grados (Profesores y Escuelas)"])
+app.include_router(examen.router, prefix="/examenes", tags=["Gestión de Exámenes (Profesores y Escuelas)"])
+app.include_router(pagos.router, prefix="/finanzas", tags=["Finanzas y Pagos(Profesores y Escuelas)"])
+app.include_router(mensualidades.router, prefix="/mensualidades", tags=["Finanzas y Pagos (Profesores y Escuelas)"])
+app.include_router(test_correos.router, prefix="/debug", tags=["Mantenimiento y Debug"])
 
 @app.get("/", tags=["General"])
 async def root():
