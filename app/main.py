@@ -1,52 +1,84 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import auth, usuarios, alumnos, torneos, profesores, escuelas, cintagrados, examen, pagos, mensualidades,test_correos
 
-# Definición de etiquetas para organizar el orden en Swagger
+# Importación de routers
+from .routers import (
+    auth, 
+    usuarios, 
+    alumnos, 
+    torneos, 
+    profesores, 
+    escuelas, 
+    cintagrados, 
+    examen, 
+    pagos, 
+    mensualidades,
+    test_correos
+)
+
+# --- CONFIGURACIÓN DE METADATOS (SWAGGER) ---
 tags_metadata = [
     {
         "name": "Autenticación",
-        "description": "Operaciones de inicio de sesión y obtención de tokens JWT.",
+        "description": "Acceso al sistema mediante tokens JWT. **Indispensable para obtener el rol del usuario.**",
     },
     {
-        "name": "Gestión de Usuarios",
-        "description": "Administración de cuentas y jerarquía de creación de perfiles.",
+        "name": "Administración del Sistema",
+        "description": "Gestión de usuarios de alto nivel (SuperAdmin), escuelas y jueces.",
     },
     {
-        "name": "Gestión de Alumnos",
-        "description": "Registro de alumnos con **asignación automática** de Escuela y Profesor según el token.",
+        "name": "Gestión Escolar",
+        "description": "Operaciones diarias: registro de alumnos, administración de profesores y perfiles de escuela.",
     },
     {
-        "name": "Gestión de Torneos",
-        "description": "Configuración de eventos, categorías e inscripciones.",
+        "name": "Exámenes y Grados",
+        "description": "Control de eventos de promoción, historial de cintas y evaluación técnica.",
+    },
+    {
+        "name": "Finanzas y Cobranza",
+        "description": "Gestión de ingresos, mensualidades masivas, inscripciones a eventos y estados de cuenta.",
+    },
+    {
+        "name": "Torneos y Competencias",
+        "description": "Logística de eventos nacionales, categorías, inscripciones y validación de acceso (QR).",
+    },
+    {
+        "name": "Mantenimiento y Debug",
+        "description": "Herramientas de prueba para desarrolladores, como el envío de correos electrónicos de prueba.",
     },
 ]
 
+# --- INICIALIZACIÓN DE LA APP ---
 app = FastAPI(
     title="Taekwondo Management System API",
     description="""
-    API robusta para la gestión integral de torneos y escuelas de Taekwondo.
+    ## 🥋 Plataforma de Gestión Integral para Academias de Taekwondo
     
-    ### Comportamiento Predictivo (Auto-asignación):
-    Esta API utiliza el token de seguridad para identificar al usuario y automatizar el flujo de datos:
-    * **Registro de Escuela**: Solo el SuperAdmin puede hacerlo.
-    * **Registro de Profesor**: El sistema detecta la Escuela del usuario logueado y vincula al profesor automáticamente.
-    * **Registro de Alumno**: 
-        - Si eres **Profesor**, el sistema detecta tu `idprofesor` y tu `idescuela` y los asigna al alumno.
-        - Si eres **Escuela**, el sistema detecta tu `idescuela` y la asigna. Puedes asignar un profesor opcionalmente.
+    Esta API centraliza la operación administrativa, financiera y deportiva de las escuelas vinculadas.
     
-    ### Seguridad:
-    Utiliza el botón **Authorize** con un token válido para probar los endpoints protegidos.
+    ### 🚀 Características Principales:
+    * **Seguridad Jerárquica**: Acceso basado en roles (SuperAdmin, Escuela, Profesor, Juez).
+    * **Lógica Predictiva**: El sistema identifica automáticamente tu escuela y profesor mediante el token JWT.
+    * **Automatización Financiera**: Generación masiva de mensualidades y cargos automáticos por inscripción a torneos.
+    * **Logística de Torneos**: Creación de categorías, control de pesaje y validación de acceso mediante QR activado por pago.
+    
+    ### 🔐 Autorización:
+    Utiliza el botón **Authorize** arriba a la derecha para ingresar tu token `Bearer`. 
+    _Nota: Los permisos varían según el rol del usuario logueado._
     """,
-    version="1.1.0",
+    version="1.5.0",
     openapi_tags=tags_metadata,
     contact={
-        "name": "Soporte Técnico",
+        "name": "Soporte Técnico TKD System",
+        "url": "https://tkdsystem.com/soporte",
         "email": "soporte@tkdsystem.com",
+    },
+    license_info={
+        "name": "Propiedad Privada - TKD System 2026",
     },
 )
 
-# Configuración de CORS
+# --- MIDDLEWARE (CORS) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -55,19 +87,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Inclusión de Routers
-app.include_router(auth.router, prefix="/auth", tags=["Autenticación (Escuelas y Profesores)"])
-app.include_router(usuarios.router, prefix="/usuarios", tags=["Gestión de Usuarios (SuperAdmin)"])
-app.include_router(alumnos.router, prefix="/alumnos", tags=["Gestión de Alumnos (Profesores y Escuelas)"])
-app.include_router(torneos.router, prefix="/torneos", tags=["Gestión de Torneos (Administrador, Escuelas, Profesores y juezes)"])
-app.include_router(profesores.router, prefix="/profesores", tags=["Gestión de Profesores (Escuelas)"])
-app.include_router(escuelas.router, prefix="/escuelas", tags=["Gestión de la Escuela (Escuelas)"])
-app.include_router(cintagrados.router, prefix="/grados", tags=["Cintas y Grados (Profesores y Escuelas)"])
-app.include_router(examen.router, prefix="/examenes", tags=["Gestión de Exámenes (Profesores y Escuelas)"])
-app.include_router(pagos.router, prefix="/finanzas", tags=["Finanzas y Pagos(Profesores y Escuelas)"])
-app.include_router(mensualidades.router, prefix="/mensualidades", tags=["Finanzas y Pagos (Profesores y Escuelas)"])
+# --- REGISTRO DE ROUTERS ---
+
+# Autenticación
+app.include_router(auth.router, prefix="/auth", tags=["Autenticación"])
+
+# Administración y Usuarios
+app.include_router(usuarios.router, prefix="/usuarios", tags=["Administración del Sistema"])
+
+# Gestión Escolar
+app.include_router(alumnos.router, prefix="/alumnos", tags=["Gestión Escolar"])
+app.include_router(profesores.router, prefix="/profesores", tags=["Gestión Escolar"])
+app.include_router(escuelas.router, prefix="/escuelas", tags=["Gestión Escolar"])
+
+# Grados y Exámenes
+app.include_router(cintagrados.router, prefix="/grados", tags=["Exámenes y Grados"])
+app.include_router(examen.router, prefix="/examenes", tags=["Exámenes y Grados"])
+
+# Finanzas y Pagos
+app.include_router(pagos.router, prefix="/finanzas", tags=["Finanzas y Cobranza"])
+app.include_router(mensualidades.router, prefix="/mensualidades", tags=["Finanzas y Cobranza"])
+
+# Torneos
+app.include_router(torneos.router, prefix="/torneos", tags=["Torneos y Competencias"])
+
+# Utilidades de Debug
 app.include_router(test_correos.router, prefix="/debug", tags=["Mantenimiento y Debug"])
 
-@app.get("/", tags=["General"])
+# --- ENDPOINTS GENERALES ---
+@app.get("/", tags=["General"], summary="Verificar estado de la API")
 async def root():
-    return {"message": "TKD API is running"}
+    """Retorna un mensaje simple para verificar que el servicio está en línea."""
+    return {
+        "status": "online",
+        "api_name": "Taekwondo Management System",
+        "version": "1.5.0"
+    }
