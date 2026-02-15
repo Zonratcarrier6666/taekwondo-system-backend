@@ -4,10 +4,10 @@ from supabase import Client
 import uuid
 import os
 
-from app.utils.database import get_db
-from app.utils.auth_utils import get_current_user
-from app.schemas.alumnos import Alumno, AlumnoCreate, AlumnoUpdate
-from app.schemas.usuarios import UserRole
+from utils.database import get_db
+from utils.auth_utils import get_current_user
+from schemas.alumnos import Alumno, AlumnoCreate, AlumnoUpdate
+from schemas.usuarios import UserRole
 
 router = APIRouter()
 

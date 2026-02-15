@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from supabase import Client
 from typing import List
 
-from app.utils.database import get_db
-from app.utils.security import get_password_hash
-from app.utils.auth_utils import get_current_user
-from app.schemas.usuarios import (
+from utils.database import get_db
+from utils.security import get_password_hash
+from utils.auth_utils import get_current_user
+from schemas.usuarios import (
     Usuario, UserRole, RegistroEscuelaCompleto, RegistroProfesorCompleto
 )
 

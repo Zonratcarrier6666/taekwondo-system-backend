@@ -2,12 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List
 from supabase import Client
 
-from app.utils.database import get_db
-from app.utils.auth_utils import get_current_user
-from app.schemas.cintagrados import Cinta, HistorialGrado
-from app.schemas.examen import PromocionManual
-from app.schemas.usuarios import UserRole
-from app.schemas.pagos import TipoPago, EstatusPago
+from utils.database import get_db
+from utils.auth_utils import get_current_user
+from schemas.cintagrados import Cinta, HistorialGrado
+from schemas.examen import PromocionManual
+from schemas.usuarios import UserRole
+from schemas.pagos import TipoPago, EstatusPago
 
 router = APIRouter(tags=["Cintas y Grados"])
 

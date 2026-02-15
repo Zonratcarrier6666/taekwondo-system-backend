@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from supabase import Client
 
 # Importaciones absolutas
-from app.utils.database import get_db
-from app.utils.security import verify_password, create_access_token
-from app.schemas.auth import Token, LoginRequest
+from utils.database import get_db
+from utils.security import verify_password, create_access_token
+from schemas.auth import Token, LoginRequest
 from fastapi.security import OAuth2PasswordRequestForm
 
 # ELIMINAMOS el prefijo "/auth" de aquí porque ya se pone en main.py

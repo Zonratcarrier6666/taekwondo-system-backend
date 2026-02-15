@@ -3,11 +3,11 @@ from typing import List
 from supabase import Client
 from datetime import date
 
-from app.utils.database import get_db
-from app.utils.auth_utils import get_current_user
-from app.schemas.examen import Examen, ExamenCreate, AsignacionExamen, CargaResultadosMasivos
-from app.schemas.usuarios import UserRole
-from app.schemas.pagos import TipoPago, EstatusPago
+from utils.database import get_db
+from utils.auth_utils import get_current_user
+from schemas.examen import Examen, ExamenCreate, AsignacionExamen, CargaResultadosMasivos
+from schemas.usuarios import UserRole
+from schemas.pagos import TipoPago, EstatusPago
 
 router = APIRouter(prefix="/examenes", tags=["Gestión de Exámenes"])
 

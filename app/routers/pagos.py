@@ -4,10 +4,10 @@ from datetime import datetime
 from supabase import Client
 import uuid
 
-from app.utils.database import get_db
-from app.utils.auth_utils import get_current_user
-from app.schemas.pagos import Pago, ProcesoPago, EstatusPago
-from app.schemas.usuarios import UserRole
+from utils.database import get_db
+from utils.auth_utils import get_current_user
+from schemas.pagos import Pago, ProcesoPago, EstatusPago
+from schemas.usuarios import UserRole
 
 # Eliminamos el prefix aquí para evitar la URL duplicada /finanzas/finanzas
 router = APIRouter(tags=["Finanzas y Pagos"])

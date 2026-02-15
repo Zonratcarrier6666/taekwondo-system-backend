@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
-from app.utils.envio_correos import enviar_pase_torneo
+from utils.envio_correos import enviar_pase_torneo
 import uuid
 
 router = APIRouter(prefix="/debug", tags=["Mantenimiento y Debug"])

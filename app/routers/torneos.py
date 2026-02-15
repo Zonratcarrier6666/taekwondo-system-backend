@@ -4,11 +4,11 @@ from datetime import date
 from supabase import Client
 import uuid
 
-from app.utils.database import get_db
-from app.utils.auth_utils import get_current_user
-from app.schemas.torneos import Torneo, TorneoCreate, InscripcionTorneo, CategoriaTorneo, CategoriaTorneoCreate
-from app.schemas.usuarios import UserRole
-from app.schemas.pagos import TipoPago, EstatusPago
+from utils.database import get_db
+from utils.auth_utils import get_current_user
+from schemas.torneos import Torneo, TorneoCreate, InscripcionTorneo, CategoriaTorneo, CategoriaTorneoCreate
+from schemas.usuarios import UserRole
+from schemas.pagos import TipoPago, EstatusPago
 
 router = APIRouter(tags=["Torneos y Competencias"]) 
 

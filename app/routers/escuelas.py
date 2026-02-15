@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
 from supabase import Client
 import uuid
 
-from app.utils.database import get_db
-from app.utils.auth_utils import get_current_user
-from app.schemas.catalogos import Escuela, EscuelaBase
-from app.schemas.usuarios import UserRole
+from utils.database import get_db
+from utils.auth_utils import get_current_user
+from schemas.catalogos import Escuela, EscuelaBase
+from schemas.usuarios import UserRole
 
 router = APIRouter(prefix="/escuelas", tags=["Gestión de la Escuela"])
 
