@@ -1,24 +1,14 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Agrega el directorio actual (/app) al path de Python
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 # Importación de routers
-from .routers import (
-    auth, 
-    usuarios, 
-    alumnos, 
-    torneos, 
-    profesores, 
-    escuelas, 
-    cintagrados, 
-    examen, 
-    pagos, 
-    mensualidades,
-    test_correos
-)
-
+from routers import auth, usuarios, alumnos, torneos, profesores, escuelas, cintagrados, examen, pagos, mensualidades, test_correos
 # --- CONFIGURACIÓN DE METADATOS (SWAGGER) ---
 tags_metadata = [
     {
