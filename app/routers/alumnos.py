@@ -4,10 +4,10 @@ from supabase import Client
 import uuid
 import os
 
-from utils.database import get_db
-from utils.auth_utils import get_current_user
-from schemas.alumnos import Alumno, AlumnoCreate, AlumnoUpdate
-from schemas.usuarios import UserRole
+from app.utils.database import get_db
+from app.utils.auth_utils import get_current_user
+from app.schemas.alumnos import Alumno, AlumnoCreate, AlumnoUpdate
+from app.schemas.usuarios import UserRole
 
 router = APIRouter()
 
@@ -17,6 +17,11 @@ async def registrar_alumno_predictivo(
     current_user: dict = Depends(get_current_user),
     db: Client = Depends(get_db)
 ):
+    """
+    Registra los datos básicos de un alumno.
+    Este es el PASO 1. El frontend recibe el objeto creado con su ID,
+    y luego decide si subir la foto inmediatamente o dejarlo para después.
+    """
     rol = current_user.get("rol")
     id_usuario = current_user.get("idusuario")
     
@@ -57,21 +62,49 @@ async def listar_alumnos_con_filtro(
 ):
     rol = current_user.get("rol")
     id_usuario = current_user.get("idusuario")
+    
+    id_escuela_contexto = None
     query = db.table("alumnos").select("*")
     
-    if rol == UserRole.SUPERADMIN:
-        pass 
-    elif rol == UserRole.ESCUELA:
+    if rol == UserRole.ESCUELA:
         escuela = db.table("datosescuela").select("idescuela").eq("idusuario", id_usuario).execute()
         if escuela.data:
-            query = query.eq("idescuela", escuela.data[0]["idescuela"])
+            id_escuela_contexto = escuela.data[0]["idescuela"]
+            query = query.eq("idescuela", id_escuela_contexto)
     elif rol == UserRole.PROFESOR:
-        profe = db.table("profesores").select("idprofesor").eq("idusuario", id_usuario).execute()
+        profe = db.table("profesores").select("idprofesor, idescuela").eq("idusuario", id_usuario).execute()
         if profe.data:
+            id_escuela_contexto = profe.data[0]["idescuela"]
             query = query.eq("idprofesor", profe.data[0]["idprofesor"])
-            
-    result = query.execute()
-    return result.data
+    
+    alumnos_res = query.execute()
+    lista_alumnos = alumnos_res.data
+
+    if not lista_alumnos:
+        return []
+
+    if id_escuela_contexto:
+        pagos_pendientes = db.table("pagos").select("idalumno, monto")\
+            .eq("idescuela", id_escuela_contexto)\
+            .eq("estatus", 0)\
+            .execute()
+        
+        mapa_deudas = {}
+        for p in pagos_pendientes.data:
+            alu_id = p["idalumno"]
+            monto = float(p["monto"])
+            if alu_id not in mapa_deudas:
+                mapa_deudas[alu_id] = {"suma": 0.0, "conteo": 0}
+            mapa_deudas[alu_id]["suma"] += monto
+            mapa_deudas[alu_id]["conteo"] += 1
+        
+        for alu in lista_alumnos:
+            deuda_info = mapa_deudas.get(alu["idalumno"], {"suma": 0.0, "conteo": 0})
+            alu["total_deuda"] = deuda_info["suma"]
+            alu["conteo_pendientes"] = deuda_info["conteo"]
+            alu["pagos_pendientes_detalle"] = []
+
+    return lista_alumnos
 
 @router.get("/{idalumno}", response_model=Alumno)
 async def obtener_detalle_alumno(
@@ -79,25 +112,25 @@ async def obtener_detalle_alumno(
     current_user: dict = Depends(get_current_user),
     db: Client = Depends(get_db)
 ):
-    rol = current_user.get("rol")
-    id_usuario = current_user.get("idusuario")
-
+    # 1. Obtener alumno base
     result = db.table("alumnos").select("*").eq("idalumno", idalumno).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Alumno no encontrado.")
     
     alumno = result.data[0]
 
-    if rol != UserRole.SUPERADMIN:
-        if rol == UserRole.ESCUELA:
-            escuela = db.table("datosescuela").select("idescuela").eq("idusuario", id_usuario).execute()
-            if not escuela.data or escuela.data[0]["idescuela"] != alumno["idescuela"]:
-                raise HTTPException(status_code=403, detail="No tienes permiso para ver este alumno.")
-        elif rol == UserRole.PROFESOR:
-            profe = db.table("profesores").select("idprofesor").eq("idusuario", id_usuario).execute()
-            if not profe.data or profe.data[0]["idprofesor"] != alumno["idprofesor"]:
-                raise HTTPException(status_code=403, detail="Este alumno no está asignado a tu perfil.")
-
+    # 2. Obtener desglose de pagos detallado
+    pagos_res = db.table("pagos")\
+        .select("idpago, monto, concepto, fecharegistro, id_tipo_pago")\
+        .eq("idalumno", idalumno)\
+        .eq("estatus", 0)\
+        .execute()
+    
+    # 3. Llenar los campos financieros del objeto de respuesta
+    alumno["total_deuda"] = sum(float(p["monto"]) for p in pagos_res.data)
+    alumno["conteo_pendientes"] = len(pagos_res.data)
+    alumno["pagos_pendientes_detalle"] = pagos_res.data
+    
     return alumno
 
 @router.post("/{idalumno}/upload-foto", response_model=Alumno)
@@ -108,47 +141,30 @@ async def subir_foto_archivo(
     db: Client = Depends(get_db)
 ):
     """
-    Sube un archivo al Storage de Supabase.
+    Sube un archivo al Storage de Supabase. 
+    Este endpoint es compatible con el flujo de 'Foto al momento' o 'Foto después'.
     """
-    # 1. Verificar permisos
     alumno_db = await obtener_detalle_alumno(idalumno, current_user, db)
-
-    # 2. Validar extensión
     extension = file.filename.split(".")[-1].lower()
     if extension not in ["jpg", "jpeg", "png"]:
         raise HTTPException(status_code=400, detail="Solo se permiten imágenes JPG o PNG.")
 
-    # 3. Preparar archivo y ruta única
     file_path = f"{idalumno}_{uuid.uuid4()}.{extension}"
     file_content = await file.read()
 
     try:
-        # Intentar subir al bucket 'alumnos'
-        # Usamos try/except específico para capturar la respuesta de Supabase
-        storage_res = db.storage.from_("alumnos").upload(
+        db.storage.from_("alumnos").upload(
             path=file_path,
             file=file_content,
             file_options={"content-type": file.content_type}
         )
-
-        # Obtener URL pública
         foto_url = db.storage.from_("alumnos").get_public_url(file_path)
-
-        # 4. Actualizar la base de datos
         update_res = db.table("alumnos").update({"fotoalumno": foto_url}).eq("idalumno", idalumno).execute()
-        return update_res.data[0]
-
-    except Exception as e:
-        error_msg = str(e)
-        print(f"CRITICAL STORAGE ERROR: {error_msg}")
         
-        if "row-level security" in error_msg.lower() or "403" in error_msg:
-             raise HTTPException(
-                status_code=500, 
-                detail=f"RLS sigue bloqueando. Ejecuta el SQL de 'Control Total' en Supabase. Error: {error_msg}"
-            )
-            
-        raise HTTPException(status_code=500, detail=f"Error inesperado en Storage: {error_msg}")
+        # Recargar para devolver con finanzas actualizadas
+        return await obtener_detalle_alumno(idalumno, current_user, db)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/{idalumno}", response_model=Alumno)
 async def actualizar_alumno(
@@ -162,7 +178,8 @@ async def actualizar_alumno(
     if not update_dict:
         raise HTTPException(status_code=400, detail="No hay datos para actualizar.")
     try:
-        result = db.table("alumnos").update(update_dict).eq("idalumno", idalumno).execute()
-        return result.data[0]
+        db.table("alumnos").update(update_dict).eq("idalumno", idalumno).execute()
+        # Siempre retornamos vía obtener_detalle_alumno para garantizar datos financieros
+        return await obtener_detalle_alumno(idalumno, current_user, db)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error al actualizar: {str(e)}")

@@ -1,11 +1,19 @@
 from pydantic import BaseModel, ConfigDict, Field, EmailStr, field_validator
-from typing import Optional, Any
+from typing import Optional, Any, List
 from datetime import date, datetime
+
+class PagoPendienteDetalle(BaseModel):
+    """Información mínima necesaria para mostrar una deuda en el detalle."""
+    idpago: int
+    monto: float
+    concepto: str
+    fecharegistro: datetime
+    id_tipo_pago: int
 
 class AlumnoBase(BaseModel):
     """
     Modelo base resiliente. 
-    Limpia los nulos de la base de datos antes de la validación.
+    Limpiador de nulos integrado.
     """
     nombres: str = Field(..., examples=["Juan Román"])
     apellidopaterno: str = Field(..., examples=["Riquelme"])
@@ -34,7 +42,6 @@ class AlumnoBase(BaseModel):
     idescuela: Optional[int] = None
     idprofesor: Optional[int] = None
 
-    # --- LIMPIADOR DE DATOS NULOS ---
     @field_validator(
         "apellidomaterno", "contacto_emergencia_nombre", "contacto_emergencia_tel",
         "nombretutor", "telefonocontacto", "direcciondomicilio", "grado_escolar",
@@ -44,16 +51,10 @@ class AlumnoBase(BaseModel):
     )
     @classmethod
     def convert_null_to_string(cls, v: Any) -> str:
-        """Convierte cualquier NULL de la BD en un string vacío para evitar errores."""
-        if v is None:
-            return ""
+        if v is None: return ""
         return str(v)
 
 class AlumnoCreate(AlumnoBase):
-    """
-    Reglas estrictas para REGISTROS NUEVOS. 
-    Aquí sí obligamos a que el usuario mande datos de calidad.
-    """
     nombres: str = Field(..., min_length=2)
     apellidopaterno: str = Field(..., min_length=2)
     direcciondomicilio: str = Field(..., min_length=10)
@@ -61,27 +62,22 @@ class AlumnoCreate(AlumnoBase):
     contacto_emergencia_tel: str = Field(..., min_length=10)
 
 class AlumnoUpdate(BaseModel):
-    """Esquema para actualizaciones parciales del perfil."""
     nombres: Optional[str] = None
     apellidopaterno: Optional[str] = None
     apellidomaterno: Optional[str] = None
     idgradoactual: Optional[int] = None
     estatus: Optional[int] = None
     fotoalumno: Optional[str] = None
-    contacto_emergencia_nombre: Optional[str] = None
-    contacto_emergencia_tel: Optional[str] = None
-    grado_escolar: Optional[str] = None
-    escuela_procedencia: Optional[str] = None
-    direcciondomicilio: Optional[str] = None
-    telefonocontacto: Optional[str] = None
-    correotutor: Optional[EmailStr] = None
-
-class AlumnoFotoUpdate(BaseModel):
-    """Esquema específico para actualizar únicamente la fotografía del alumno."""
-    fotoalumno: str = Field(..., description="URL de la imagen almacenada o string en formato Base64", examples=["https://storage.googleapis.com/tu-bucket/foto.jpg"])
 
 class Alumno(AlumnoBase):
-    """Representación final para la API."""
+    """Representación final con finanzas y desglose de deudas."""
     idalumno: int
     fecharegistro: datetime
+    
+    total_deuda: float = Field(default=0.0)
+    conteo_pendientes: int = Field(default=0)
+    
+    # Campo nuevo: Lista detallada de cada cargo pendiente
+    pagos_pendientes_detalle: List[PagoPendienteDetalle] = Field(default_factory=list)
+
     model_config = ConfigDict(from_attributes=True)
