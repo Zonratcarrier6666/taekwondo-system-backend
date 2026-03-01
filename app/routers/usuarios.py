@@ -172,3 +172,16 @@ async def registrar_staff(
 @router.get("/perfil", response_model=dict)
 async def obtener_mi_perfil(current_user: dict = Depends(get_current_user)):
     return current_user
+
+# ─── LISTAR ESCUELAS (para selectores) ───────────────────────
+
+@router.get("/escuelas", summary="Lista de escuelas para selectores")
+async def listar_escuelas(
+    current_user: dict = Depends(get_current_user),
+    db: Client = Depends(get_db),
+):
+    _require_roles(current_user, [UserRole.SUPERADMIN])
+    r = db.table("datosescuela").select(
+        "idescuela, nombreescuela, idusuario"
+    ).order("nombreescuela").execute()
+    return {"ok": True, "escuelas": r.data or []}
