@@ -105,7 +105,7 @@ async def registrar_profesor(
             "idusuario":      new_user["idusuario"],
             "idescuela":      idescuela,
             "nombrecompleto": datos.nombre_completo,
-            "idgradodan":     datos.idgradodan,
+            "idgradodan":     datos.idgradodan or 11,  # default: cinta blanca
         }).execute()
         return new_user
     except HTTPException:
