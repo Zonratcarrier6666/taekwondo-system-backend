@@ -7,7 +7,7 @@ import os
 from app.utils.database import get_db
 from app.utils.auth_utils import get_current_user
 from app.schemas.alumnos import Alumno, AlumnoCreate, AlumnoUpdate
-from app.schemas.usuarios import UserRole
+from app.schemas.roles import UserRole
 
 router = APIRouter()
 

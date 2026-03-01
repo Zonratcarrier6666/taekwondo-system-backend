@@ -6,7 +6,7 @@ import uuid
 from app.utils.database import get_db
 from app.utils.auth_utils import get_current_user
 from app.schemas.profesores import Profesor, ProfesorCreate, ProfesorUpdate
-from app.schemas.usuarios import UserRole
+from app.schemas.roles import UserRole
 
 # Se elimina el prefix="/profesores" para evitar la duplicidad con el prefijo definido en main.py
 router = APIRouter(tags=["Gestión de Profesores"])
