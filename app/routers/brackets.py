@@ -396,14 +396,13 @@ async def registrar_resultado(
         "tiempo_fin":   datetime.now().isoformat(),
     }).eq("idcombate", idcombate).execute()
 
-    # Calcular total de rondas de esta categoría
-    total_combates_cat = db.table("combates").select("ronda")\
+    # Calcular total de rondas REAL — basado en participantes inscritos de la categoría
+    inscritos_cat = db.table("inscripciones_torneo").select("idinscripcion")\
         .eq("idtorneo", c["idtorneo"])\
-        .eq("idcategoria", c["idcategoria"]).execute()
-    total_rondas = max((x["ronda"] for x in total_combates_cat.data), default=1)
-    # Total rondas real = log2(participantes), lo calculamos desde los combates existentes
-    rondas_existentes = set(x["ronda"] for x in total_combates_cat.data)
-    max_ronda_posible = int(math.log2(_siguiente_potencia_2(len(total_combates_cat.data)))) + 1
+        .eq("idcategoria", c["idcategoria"])\
+        .eq("estatus_pago", "pagado").execute()
+    n_participantes = len(inscritos_cat.data) if inscritos_cat.data else 2
+    total_rondas = int(math.log2(_siguiente_potencia_2(max(n_participantes, 2))))
 
     # Avanzar ganador a la siguiente ronda
     _avanzar_ganador(
@@ -412,7 +411,7 @@ async def registrar_resultado(
         ronda_actual=c["ronda"],
         posicion_actual=c["bracket_posicion"],
         ganador_idinscripcion=ganador_id,
-        total_rondas=max_ronda_posible,
+        total_rondas=total_rondas,
         db=db,
         id_juez=c.get("id_juez"),
     )
