@@ -126,6 +126,22 @@ def _html_recordatorio(
 
 
 # ─────────────────────────────────────────────────────────────
+#  COMPATIBILIDAD: send_email — usado por scheduler.py
+#  Redirige al nuevo send_resend_email sin romper imports existentes
+# ─────────────────────────────────────────────────────────────
+
+def send_email(to_email: str, subject: str, html_body: str, from_name: str = "TKW Sistema") -> bool:
+    """Alias de compatibilidad para scheduler.py y otros módulos que usaban send_email."""
+    result = send_resend_email(
+        to=to_email,
+        subject=subject,
+        html=html_body,
+        from_email=f"{from_name} <onboarding@resend.dev>",
+    )
+    return result.get("success", False)
+
+
+# ─────────────────────────────────────────────────────────────
 #  ORQUESTADORES  (ahora usan send_resend_email)
 # ─────────────────────────────────────────────────────────────
 
