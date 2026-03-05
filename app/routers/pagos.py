@@ -12,7 +12,10 @@ from supabase import Client
 
 from app.utils.database   import get_db
 from app.utils.auth_utils import get_current_user
-from app.utils.qr_generator import generar_token_qr, generar_pdf_qr, enviar_qr_por_correo
+from app.utils.qr_generator import (
+    generar_token_qr, generar_pdf_qr,
+    enviar_qr_por_correo, enviar_confirmacion_cobro,   # ← nuevo
+)
 from app.schemas.pagos import (
     TipoPago, EstatusPago, CicloSemestral,
     get_ciclo_actual, alumno_debe_inscripcion,
@@ -360,7 +363,7 @@ async def inscripciones_masivo(
 #  4. COBRAR
 # ─────────────────────────────────────────────────────────────
 
-@router.post("/cobrar", summary="Registrar pago y disparar QR si es torneo")
+@router.post("/cobrar", summary="Registrar pago y enviar confirmación por correo")
 async def cobrar_pago(
     body: RegistrarPago,
     user: dict = Depends(get_current_user),
@@ -368,80 +371,108 @@ async def cobrar_pago(
 ):
     """
     Cambia el estatus de un pago a PAGADO.
-    Si el pago es de un TORNEO (Tipo 4), genera el QR y envía el PDF al tutor.
+    - Tipo TORNEO (4): genera QR + PDF y envía al tutor.
+    - Cualquier otro tipo: envía confirmación de cobro al tutor.
+    Ambos usan Resend (no SMTP).
     """
     _require_staff(user)
 
-    # 1. Obtener datos del pago antes de actualizar
+    # 1. Obtener datos del pago
     p_res = db.table("pagos").select("*").eq("idpago", body.idpago).execute()
     if not p_res.data:
         raise HTTPException(404, "No se encontró el registro de pago")
-    
     pago = p_res.data[0]
 
-    # 2. Actualizar el pago a estatus PAGADO (1)
-    upd_data = {
-        "estatus":         int(EstatusPago.PAGADO),
-        "metodo_pago":     body.metodo_pago.value,
-        "fecha_pago":      datetime.now().isoformat(),
-        "url_comprobante": body.url_comprobante,
+    # 2. Marcar como PAGADO
+    db.table("pagos").update({
+        "estatus":           int(EstatusPago.PAGADO),
+        "metodo_pago":       body.metodo_pago.value,
+        "fecha_pago":        datetime.now().isoformat(),
+        "url_comprobante":   body.url_comprobante,
         "notas_adicionales": body.notas,
-    }
-    db.table("pagos").update(upd_data).eq("idpago", body.idpago).execute()
+    }).eq("idpago", body.idpago).execute()
 
-    # 3. ¿ES UN TORNEO? (Tipo 4)
-    if pago.get("id_tipo_pago") == 4:
-        desglose = pago.get("desglose_interno") or {}
+    # 3. Datos compartidos: alumno y escuela
+    al_res  = db.table("alumnos").select("*")\
+                .eq("idalumno", pago["idalumno"]).execute()
+    esc_res = db.table("datosescuela").select("nombreescuela")\
+                .eq("idescuela", pago.get("idescuela", 0)).execute()
+
+    correo_tutor   = None
+    nombre_alumno  = "Alumno"
+    nombre_escuela = "Dragon Negro Dojo"
+
+    if al_res.data:
+        al            = al_res.data[0]
+        correo_tutor  = al.get("correotutor")
+        nombre_alumno = f"{al['nombres']} {al['apellidopaterno']}"
+    if esc_res.data:
+        nombre_escuela = esc_res.data[0].get("nombreescuela", nombre_escuela)
+
+    # 4a. TORNEO → QR + PDF
+    if pago.get("id_tipo_pago") == int(TipoPago.TORNEO):
+        desglose      = pago.get("desglose_interno") or {}
         idinscripcion = desglose.get("idinscripcion")
         idtorneo      = desglose.get("idtorneo")
 
-        if idinscripcion and idtorneo:
-            # A. Generar Token QR único
+        if idinscripcion and idtorneo and al_res.data:
             token_qr = generar_token_qr()
-
-            # B. Actualizar inscripción a 'pagado' y asignar el QR
             db.table("inscripciones_torneo").update({
                 "estatus_pago": "pagado",
-                "token_qr":     token_qr
+                "token_qr":     token_qr,
             }).eq("idinscripcion", idinscripcion).execute()
 
-            # C. Obtener datos del alumno y torneo para el PDF
-            al_res = db.table("alumnos").select("*").eq("idalumno", pago["idalumno"]).execute()
-            t_res  = db.table("torneos").select("*").eq("idtorneo", idtorneo).execute()
-            
-            if al_res.data and t_res.data:
-                al = al_res.data[0]
+            t_res = db.table("torneos").select("*")\
+                      .eq("idtorneo", idtorneo).execute()
+            if t_res.data:
                 torneo = t_res.data[0]
-                nombre_alumno = f"{al['nombres']} {al['apellidopaterno']}"
-
-                # D. Generar el PDF profesional con el QR
-                pdf_bytes = generar_pdf_qr(
-                    token         = token_qr,
-                    nombre_alumno = nombre_alumno,
-                    nombre_torneo = torneo["nombre"],
-                    fecha_torneo  = torneo["fecha"],
-                    hora_torneo   = torneo.get("hora_inicio", "09:00"),
-                    sede_torneo   = torneo["sede"],
-                    ciudad_torneo = torneo["ciudad"],
-                    cinta         = "Confirmada", 
-                    edad          = _calcular_edad(al.get("fechanacimiento", "")),
-                    peso          = al.get("peso")
-                )
-
-                # E. Enviar correo al tutor (Incluye QR en cuerpo y PDF adjunto)
-                if al.get("correotutor"):
-                    enviar_qr_por_correo(
-                        token         = token_qr, # Pasamos el token para generar la imagen inline
-                        correo_tutor  = al["correotutor"],
+                try:
+                    pdf_bytes = generar_pdf_qr(
+                        token         = token_qr,
                         nombre_alumno = nombre_alumno,
                         nombre_torneo = torneo["nombre"],
                         fecha_torneo  = torneo["fecha"],
                         hora_torneo   = torneo.get("hora_inicio", "09:00"),
                         sede_torneo   = torneo["sede"],
                         ciudad_torneo = torneo["ciudad"],
-                        pdf_bytes     = pdf_bytes,
-                        from_name     = "Dragon Negro Dojo"
+                        cinta         = "Confirmada",
+                        edad          = _calcular_edad(al.get("fechanacimiento", "")),
+                        peso          = al.get("peso"),
                     )
+                    if correo_tutor:
+                        enviar_qr_por_correo(
+                            token         = token_qr,
+                            correo_tutor  = correo_tutor,
+                            nombre_alumno = nombre_alumno,
+                            nombre_torneo = torneo["nombre"],
+                            fecha_torneo  = torneo["fecha"],
+                            hora_torneo   = torneo.get("hora_inicio", "09:00"),
+                            sede_torneo   = torneo["sede"],
+                            ciudad_torneo = torneo["ciudad"],
+                            pdf_bytes     = pdf_bytes,
+                            from_name     = nombre_escuela,
+                        )
+                except Exception as e:
+                    # El cobro ya quedó guardado — no revertir por error de email
+                    print(f"[ERROR QR/PDF] idpago={body.idpago}: {e}")
+
+    # 4b. MENSUALIDAD / INSCRIPCIÓN / EXAMEN / OTRO → confirmación simple
+    else:
+        if correo_tutor:
+            try:
+                enviar_confirmacion_cobro(
+                    correo_tutor  = correo_tutor,
+                    nombre_alumno = nombre_alumno,
+                    concepto      = pago.get("concepto", "Pago"),
+                    monto         = float(pago.get("monto") or 0),
+                    metodo_pago   = body.metodo_pago.value,
+                    folio         = pago.get("folio_recibo", ""),
+                    nombre_escuela = nombre_escuela,
+                )
+            except Exception as e:
+                print(f"[ERROR EMAIL COBRO] idpago={body.idpago}: {e}")
+        else:
+            print(f"[COBRO] idpago={body.idpago} — alumno sin correotutor, no se envió email")
 
     return {"ok": True, "mensaje": "Cobro registrado y QR enviado al correo"}
 

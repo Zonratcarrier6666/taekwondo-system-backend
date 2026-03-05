@@ -1,20 +1,28 @@
 # ============================================================
 #  app/utils/qr_generator.py
-#  Genera QR como PDF y ahora lo incluye en el cuerpo del email
+#  Genera QR como PDF y lo envía vía RESEND (no SMTP)
 # ============================================================
 
 import os
 import io
 import uuid
+import base64
 from typing import Optional
+
 import qrcode
 from PIL import Image
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer,
+    Image as RLImage, Table, TableStyle,
+)
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
+
+# ✅ Reutilizamos el mismo send_resend_email que ya funciona
+from utils.envio_correos import send_resend_email
 
 APP_URL = os.environ.get("APP_URL", "http://localhost:5173")
 
@@ -24,11 +32,10 @@ APP_URL = os.environ.get("APP_URL", "http://localhost:5173")
 # ─────────────────────────────────────────────────────────────
 
 def generar_token_qr() -> str:
-    """Genera un UUID único para el QR."""
     return str(uuid.uuid4())
 
+
 def generar_imagen_qr(token: str) -> Image.Image:
-    """Genera imagen PIL del QR a partir del token."""
     url = f"{APP_URL}/torneos/validar-qr/{token}"
     qr = qrcode.QRCode(
         version=1,
@@ -39,6 +46,19 @@ def generar_imagen_qr(token: str) -> Image.Image:
     qr.add_data(url)
     qr.make(fit=True)
     return qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+
+def _qr_as_base64_png(token: str) -> str:
+    """
+    Convierte el QR a data URI base64.
+    Resend no soporta imágenes inline CID, así que usamos data URI
+    directamente en el src del <img>.
+    """
+    img = generar_imagen_qr(token)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -52,147 +72,235 @@ def generar_pdf_qr(
     peso: Optional[float] = None,
 ) -> bytes:
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
-    styles = getSampleStyleSheet()
-    centered = ParagraphStyle("centered", parent=styles["Normal"], alignment=TA_CENTER)
-    title_style = ParagraphStyle("title", parent=styles["Heading1"], alignment=TA_CENTER, fontSize=22, textColor=colors.HexColor("#7c3aed"), spaceAfter=4)
-    subtitle_style = ParagraphStyle("subtitle", parent=styles["Normal"], alignment=TA_CENTER, fontSize=13, textColor=colors.HexColor("#64748b"), spaceAfter=16)
-    label_style = ParagraphStyle("label", parent=styles["Normal"], fontSize=10, textColor=colors.HexColor("#64748b"))
-    value_style = ParagraphStyle("value", parent=styles["Normal"], fontSize=12, textColor=colors.HexColor("#0f172a"), fontName="Helvetica-Bold")
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=2*cm, leftMargin=2*cm,
+        topMargin=2*cm,   bottomMargin=2*cm,
+    )
+    styles     = getSampleStyleSheet()
+    centered   = ParagraphStyle("centered",  parent=styles["Normal"], alignment=TA_CENTER)
+    title_s    = ParagraphStyle("title",     parent=styles["Heading1"], alignment=TA_CENTER,
+                                fontSize=22, textColor=colors.HexColor("#7c3aed"), spaceAfter=4)
+    subtitle_s = ParagraphStyle("subtitle",  parent=styles["Normal"], alignment=TA_CENTER,
+                                fontSize=13, textColor=colors.HexColor("#64748b"), spaceAfter=16)
+    label_s    = ParagraphStyle("label",     parent=styles["Normal"], fontSize=10,
+                                textColor=colors.HexColor("#64748b"))
+    value_s    = ParagraphStyle("value",     parent=styles["Normal"], fontSize=12,
+                                textColor=colors.HexColor("#0f172a"), fontName="Helvetica-Bold")
 
     qr_img = generar_imagen_qr(token)
-    qr_buffer = io.BytesIO()
-    qr_img.save(qr_buffer, format="PNG")
-    qr_buffer.seek(0)
-    qr_rl = RLImage(qr_buffer, width=6*cm, height=6*cm)
+    qr_buf = io.BytesIO()
+    qr_img.save(qr_buf, format="PNG")
+    qr_buf.seek(0)
+    qr_rl = RLImage(qr_buf, width=6*cm, height=6*cm)
 
     peso_str = f"{peso:.1f} kg" if peso else "No registrado"
     data_table = [
-        [Paragraph("Participante", label_style),  Paragraph(nombre_alumno, value_style)],
-        [Paragraph("Torneo",       label_style),  Paragraph(nombre_torneo,  value_style)],
-        [Paragraph("Fecha",        label_style),  Paragraph(f"{fecha_torneo} — {hora_torneo}", value_style)],
-        [Paragraph("Sede",         label_style),  Paragraph(f"{sede_torneo}, {ciudad_torneo}", value_style)],
-        [Paragraph("Cinta",        label_style),  Paragraph(cinta,           value_style)],
-        [Paragraph("Edad",         label_style),  Paragraph(f"{edad} años",  value_style)],
-        [Paragraph("Peso",         label_style),  Paragraph(peso_str,        value_style)],
+        [Paragraph("Participante", label_s), Paragraph(nombre_alumno,                      value_s)],
+        [Paragraph("Torneo",       label_s), Paragraph(nombre_torneo,                      value_s)],
+        [Paragraph("Fecha",        label_s), Paragraph(f"{fecha_torneo} — {hora_torneo}",  value_s)],
+        [Paragraph("Sede",         label_s), Paragraph(f"{sede_torneo}, {ciudad_torneo}",  value_s)],
+        [Paragraph("Cinta",        label_s), Paragraph(cinta,                              value_s)],
+        [Paragraph("Edad",         label_s), Paragraph(f"{edad} años",                     value_s)],
+        [Paragraph("Peso",         label_s), Paragraph(peso_str,                           value_s)],
     ]
     table = Table(data_table, colWidths=[4*cm, 11*cm])
     table.setStyle(TableStyle([
         ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#f8fafc"), colors.white]),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ROUNDEDCORNERS", (0, 0), (-1, -1), 6),
+        ("GRID",           (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+        ("VALIGN",         (0, 0), (-1, -1), "MIDDLE"),
     ]))
 
-    story = [
-        Paragraph("🥋 TKW System", title_style),
-        Paragraph("Credencial de acceso al torneo", subtitle_style),
+    doc.build([
+        Paragraph("🥋 TKW System", title_s),
+        Paragraph("Credencial de acceso al torneo", subtitle_s),
         qr_rl, Spacer(1, 0.5*cm),
         Paragraph("Presenta este QR en la entrada del evento", centered),
         Spacer(1, 0.8*cm), table,
-    ]
-    doc.build(story)
+    ])
     buffer.seek(0)
     return buffer.read()
 
 
 # ─────────────────────────────────────────────────────────────
-#  ENVIAR QR POR CORREO (INLINE + PDF)
+#  HTML TEMPLATES
 # ─────────────────────────────────────────────────────────────
 
 def _html_qr_torneo(
     nombre_alumno: str, nombre_torneo: str,
-    fecha_torneo: str, hora_torneo: str,
-    sede_torneo: str, ciudad_torneo: str,
+    fecha_torneo: str, sede_torneo: str,
+    qr_data_uri: str,           # ← base64 data URI, no CID
 ) -> str:
     return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
 <style>
   body{{font-family:Arial,sans-serif;background:#f1f5f9;margin:0;padding:0}}
-  .w{{max-width:520px;margin:32px auto;background:#fff;border-radius:20px;box-shadow:0 4px 24px rgba(0,0,0,.10);overflow:hidden}}
+  .w{{max-width:520px;margin:32px auto;background:#fff;border-radius:20px;
+      box-shadow:0 4px 24px rgba(0,0,0,.10);overflow:hidden}}
   .h{{background:linear-gradient(135deg,#7c3aed,#06b6d4);padding:28px;text-align:center}}
   .h h1{{color:#fff;margin:0;font-size:20px;font-weight:900}}
+  .h p{{color:rgba(255,255,255,.8);margin:6px 0 0;font-size:13px}}
   .b{{padding:24px;text-align:center}}
-  .qr-box{{background:#f8fafc;padding:20px;border-radius:15px;margin:20px 0;display:inline-block;border:1px solid #e2e8f0}}
-  .row{{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1f5f9;text-align:left}}
+  .qr-box{{background:#f8fafc;padding:20px;border-radius:15px;
+           margin:20px auto;display:inline-block;border:1px solid #e2e8f0}}
+  .row{{display:flex;justify-content:space-between;padding:9px 0;
+        border-bottom:1px solid #f1f5f9;text-align:left}}
   .row span:first-child{{color:#64748b;font-size:13px}}
   .row span:last-child{{color:#0f172a;font-size:13px;font-weight:700}}
-  .foot{{background:#f8fafc;padding:14px;text-align:center;color:#94a3b8;font-size:11px;border-top:1px solid #e2e8f0}}
+  .foot{{background:#f8fafc;padding:14px;text-align:center;
+         color:#94a3b8;font-size:11px;border-top:1px solid #e2e8f0}}
 </style></head><body>
 <div class="w">
-  <div class="h"><h1>🏆 ¡Inscripción confirmada!</h1><p style="color:white">{nombre_torneo}</p></div>
+  <div class="h">
+    <h1>🏆 ¡Inscripción confirmada!</h1>
+    <p>{nombre_torneo}</p>
+  </div>
   <div class="b">
-    <p style="font-size:14px;color:#374151">Hola, <strong>{nombre_alumno}</strong> ya tiene su pase listo.</p>
-    
-    <!-- QR VISIBLE EN EL CUERPO -->
+    <p style="font-size:14px;color:#374151">
+      Hola, <strong>{nombre_alumno}</strong> ya tiene su pase listo.
+    </p>
     <div class="qr-box">
-      <img src="cid:qr_image" width="200" height="200" alt="QR de acceso">
-      <p style="font-size:11px;color:#64748b;margin-top:10px">Escanea este código en la entrada</p>
+      <img src="{qr_data_uri}" width="200" height="200" alt="QR de acceso">
+      <p style="font-size:11px;color:#64748b;margin-top:10px">
+        Escanea este código en la entrada
+      </p>
     </div>
-
     <div class="row"><span>Torneo</span><span>{nombre_torneo}</span></div>
     <div class="row"><span>Fecha</span><span>{fecha_torneo}</span></div>
     <div class="row"><span>Sede</span><span>{sede_torneo}</span></div>
-    <p style="font-size:12px;color:#64748b;margin-top:20px">También hemos adjuntado una copia en PDF para tu comodidad.</p>
+    <p style="font-size:12px;color:#64748b;margin-top:20px">
+      También hemos adjuntado una copia en PDF para tu comodidad.
+    </p>
   </div>
   <div class="foot">Dragon Negro Dojo · TKW System</div>
 </div></body></html>"""
 
 
+def _html_cobro_confirmado(
+    nombre_alumno: str, concepto: str, monto: float,
+    metodo_pago: str, folio: str,
+    nombre_escuela: str = "Dragon Negro Dojo",
+) -> str:
+    return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<style>
+  body{{font-family:Arial,sans-serif;background:#f1f5f9;margin:0;padding:0}}
+  .w{{max-width:520px;margin:32px auto;background:#fff;border-radius:20px;
+      box-shadow:0 4px 24px rgba(0,0,0,.10);overflow:hidden}}
+  .h{{background:linear-gradient(135deg,#059669,#06b6d4);padding:28px;text-align:center}}
+  .h h1{{color:#fff;margin:0;font-size:20px;font-weight:900}}
+  .h p{{color:rgba(255,255,255,.8);margin:6px 0 0;font-size:12px}}
+  .b{{padding:24px}}
+  .check{{font-size:52px;text-align:center;padding:16px 0}}
+  .row{{display:flex;justify-content:space-between;padding:9px 0;
+        border-bottom:1px solid #f1f5f9}}
+  .row span:first-child{{color:#64748b;font-size:13px}}
+  .row span:last-child{{color:#0f172a;font-size:13px;font-weight:700}}
+  .monto{{font-size:38px;font-weight:900;color:#059669;text-align:center;padding:20px 0}}
+  .note{{font-size:12px;color:#64748b;text-align:center;margin-top:0}}
+  .foot{{background:#f8fafc;padding:14px;text-align:center;
+         color:#94a3b8;font-size:11px;border-top:1px solid #e2e8f0}}
+</style></head><body>
+<div class="w">
+  <div class="h">
+    <h1>🥋 {nombre_escuela}</h1>
+    <p>Confirmación de pago</p>
+  </div>
+  <div class="b">
+    <div class="check">✅</div>
+    <div class="row"><span>Alumno</span><span>{nombre_alumno}</span></div>
+    <div class="row"><span>Concepto</span><span>{concepto}</span></div>
+    <div class="row"><span>Folio</span><span>{folio}</span></div>
+    <div class="row"><span>Método de pago</span><span>{metodo_pago}</span></div>
+    <div class="monto">${monto:,.2f} MXN</div>
+    <p class="note">Pago registrado exitosamente. Conserva este correo como comprobante.</p>
+  </div>
+  <div class="foot">Generado automáticamente · TKW System</div>
+</div></body></html>"""
+
+
+# ─────────────────────────────────────────────────────────────
+#  ENVÍO VÍA RESEND
+# ─────────────────────────────────────────────────────────────
+
 def enviar_qr_por_correo(
-    token: str, correo_tutor: str, nombre_alumno: str,
-    nombre_torneo: str, fecha_torneo: str, hora_torneo: str,
-    sede_torneo: str, ciudad_torneo: str, pdf_bytes: bytes,
-    from_name: str = "TKW Sistema",
+    token: str,
+    correo_tutor: str,
+    nombre_alumno: str,
+    nombre_torneo: str,
+    fecha_torneo: str,
+    hora_torneo: str,
+    sede_torneo: str,
+    ciudad_torneo: str,
+    pdf_bytes: bytes,
+    from_name: str = "Dragon Negro Dojo",
 ) -> bool:
-    import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
-    from email.mime.base import MIMEBase
-    from email.mime.image import MIMEImage
-    from email import encoders
-
-    EMAIL_USER = os.environ.get("EMAIL_USER", "")
-    EMAIL_PASS = os.environ.get("EMAIL_PASS", "")
-
-    if not EMAIL_USER or not EMAIL_PASS: return False
-
+    """
+    Envía QR + PDF del torneo usando Resend.
+    - El QR se incrusta como base64 data URI (Resend no soporta CID inline).
+    - El PDF va como attachment en base64.
+    """
     try:
-        # Usamos 'related' para que la imagen inline funcione correctamente
-        msg = MIMEMultipart("related")
-        msg["Subject"] = f"🏆 QR de acceso — {nombre_torneo} | {nombre_alumno}"
-        msg["From"] = f"{from_name} <{EMAIL_USER}>"
-        msg["To"] = correo_tutor
+        import resend as resend_sdk
+        import os
+        resend_sdk.api_key = os.environ.get("RESEND_API_KEY", "")
 
-        # Contenedor para el cuerpo (HTML + Imagen inline)
-        msg_alternative = MIMEMultipart("alternative")
-        msg.attach(msg_alternative)
+        if not resend_sdk.api_key:
+            print("[QR EMAIL] RESEND_API_KEY no configurada")
+            return False
 
-        # Cuerpo HTML con referencia cid:qr_image
-        html_body = _html_qr_torneo(nombre_alumno, nombre_torneo, fecha_torneo, hora_torneo, sede_torneo, ciudad_torneo)
-        msg_alternative.attach(MIMEText(html_body, "html"))
+        qr_data_uri = _qr_as_base64_png(token)
+        html = _html_qr_torneo(
+            nombre_alumno, nombre_torneo,
+            fecha_torneo, sede_torneo, qr_data_uri,
+        )
+        pdf_b64   = base64.b64encode(pdf_bytes).decode()
+        filename  = f"Pase_{nombre_alumno.replace(' ', '_')}.pdf"
 
-        # Generar imagen QR para el cuerpo
-        qr_img = generar_imagen_qr(token)
-        qr_img_bytes = io.BytesIO()
-        qr_img.save(qr_img_bytes, format="PNG")
-        
-        img_part = MIMEImage(qr_img_bytes.getvalue())
-        img_part.add_header("Content-ID", "<qr_image>") # Debe coincidir con cid:qr_image en el HTML
-        img_part.add_header("Content-Disposition", "inline", filename="qr.png")
-        msg.attach(img_part)
-
-        # PDF adjunto
-        pdf_part = MIMEBase("application", "pdf")
-        pdf_part.set_payload(pdf_bytes)
-        encoders.encode_base64(pdf_part)
-        pdf_part.add_header("Content-Disposition", f"attachment; filename=Pase_{nombre_alumno.replace(' ', '_')}.pdf")
-        msg.attach(pdf_part)
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
-            srv.login(EMAIL_USER, EMAIL_PASS)
-            srv.sendmail(EMAIL_USER, correo_tutor, msg.as_string())
-
+        response = resend_sdk.Emails.send({
+            "from":    f"{from_name} <onboarding@resend.dev>",
+            "to":      [correo_tutor],
+            "subject": f"🏆 QR de acceso — {nombre_torneo} | {nombre_alumno}",
+            "html":    html,
+            "attachments": [{"filename": filename, "content": pdf_b64}],
+        })
+        print(f"[QR EMAIL ✓] id={response.get('id')} → {correo_tutor}")
         return True
+
     except Exception as e:
-        print(f"[ERROR EMAIL] {e}")
+        print(f"[QR EMAIL ✗] {e}")
+        return False
+
+
+def enviar_confirmacion_cobro(
+    correo_tutor: str,
+    nombre_alumno: str,
+    concepto: str,
+    monto: float,
+    metodo_pago: str,
+    folio: str,
+    nombre_escuela: str = "Dragon Negro Dojo",
+) -> bool:
+    """
+    Confirmación de cobro para mensualidades, inscripciones, exámenes, etc.
+    Usa send_resend_email del módulo envio_correos.
+    """
+    try:
+        html   = _html_cobro_confirmado(
+            nombre_alumno, concepto, monto,
+            metodo_pago, folio, nombre_escuela,
+        )
+        result = send_resend_email(
+            to      = correo_tutor,
+            subject = f"✅ Pago confirmado — {concepto} | {nombre_alumno}",
+            html    = html,
+            from_email = f"{nombre_escuela} <onboarding@resend.dev>",
+        )
+        ok = result.get("success", False)
+        if ok:
+            print(f"[COBRO EMAIL ✓] id={result.get('id')} → {correo_tutor}")
+        else:
+            print(f"[COBRO EMAIL ✗] {result.get('error')}")
+        return ok
+
+    except Exception as e:
+        print(f"[COBRO EMAIL ✗] {e}")
         return False

@@ -1,24 +1,19 @@
 # ============================================================
 #  app/utils/notificaciones.py
-#  Solo Email SMTP Gmail
-#  .env requerido: EMAIL_USER, EMAIL_PASS, APP_URL
+#  Notificaciones vía RESEND (ya no usa SMTP Gmail)
 # ============================================================
 
 import os
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import Optional
 
-EMAIL_USER = os.environ.get("EMAIL_USER", "")
-EMAIL_PASS = os.environ.get("EMAIL_PASS", "")
-APP_URL    = os.environ.get("APP_URL", "http://localhost:5173")
-SMTP_HOST  = "smtp.gmail.com"
-SMTP_PORT  = 465
+# ✅ Mismo módulo que ya funciona en producción
+from utils.envio_correos import send_resend_email
+
+APP_URL = os.environ.get("APP_URL", "http://localhost:5173")
 
 
 # ─────────────────────────────────────────────────────────────
-#  HTML TEMPLATES
+#  HTML TEMPLATES  (sin cambios de diseño)
 # ─────────────────────────────────────────────────────────────
 
 def _html_pago_pendiente(
@@ -131,36 +126,7 @@ def _html_recordatorio(
 
 
 # ─────────────────────────────────────────────────────────────
-#  ENVÍO EMAIL
-# ─────────────────────────────────────────────────────────────
-
-def send_email(
-    to_email:  str,
-    subject:   str,
-    html_body: str,
-    from_name: str = "TKW Sistema",
-) -> bool:
-    if not EMAIL_USER or not EMAIL_PASS:
-        print("[EMAIL] Configura EMAIL_USER y EMAIL_PASS en .env")
-        return False
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = f"{from_name} <{EMAIL_USER}>"
-        msg["To"]      = to_email
-        msg.attach(MIMEText(html_body, "html"))
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as srv:
-            srv.login(EMAIL_USER, EMAIL_PASS)
-            srv.sendmail(EMAIL_USER, to_email, msg.as_string())
-        print(f"[EMAIL ✓] → {to_email}")
-        return True
-    except Exception as e:
-        print(f"[EMAIL ✗] → {to_email}: {e}")
-        return False
-
-
-# ─────────────────────────────────────────────────────────────
-#  ORQUESTADORES
+#  ORQUESTADORES  (ahora usan send_resend_email)
 # ─────────────────────────────────────────────────────────────
 
 def notificar_pago_pendiente(
@@ -171,22 +137,23 @@ def notificar_pago_pendiente(
     monto:             float,
     folio:             str,
     fecha_vencimiento: str,
+    canal:             str = "email",          # canal ignorado, siempre email
 ) -> dict:
     result = {"email": None, "error": None}
-
     if not correo_tutor:
         result["error"] = "Sin correo del tutor registrado"
         return result
-
-    result["email"] = send_email(
-        correo_tutor,
-        f"Pago pendiente — {concepto} | {nombre_escuela}",
-        _html_pago_pendiente(
+    r = send_resend_email(
+        to      = correo_tutor,
+        subject = f"Pago pendiente — {concepto} | {nombre_escuela}",
+        html    = _html_pago_pendiente(
             nombre_alumno, nombre_escuela,
             concepto, monto, folio, fecha_vencimiento,
         ),
-        nombre_escuela,
+        from_email = f"{nombre_escuela} <onboarding@resend.dev>",
     )
+    result["email"] = r.get("success", False)
+    result["error"] = r.get("error")
     return result
 
 
@@ -198,17 +165,17 @@ def notificar_formulario_inscripcion(
     link_formulario: str,
 ) -> dict:
     result = {"email": None, "error": None}
-
     if not correo_tutor:
         result["error"] = "Sin correo del tutor registrado"
         return result
-
-    result["email"] = send_email(
-        correo_tutor,
-        f"Formulario inscripción {ciclo} — {nombre_escuela}",
-        _html_formulario(nombre_alumno, nombre_escuela, ciclo, link_formulario),
-        nombre_escuela,
+    r = send_resend_email(
+        to      = correo_tutor,
+        subject = f"Formulario inscripción {ciclo} — {nombre_escuela}",
+        html    = _html_formulario(nombre_alumno, nombre_escuela, ciclo, link_formulario),
+        from_email = f"{nombre_escuela} <onboarding@resend.dev>",
     )
+    result["email"] = r.get("success", False)
+    result["error"] = r.get("error")
     return result
 
 
@@ -220,15 +187,15 @@ def notificar_recordatorio(
     dias_vencido:   int,
 ) -> dict:
     result = {"email": None, "error": None}
-
     if not correo_tutor:
         result["error"] = "Sin correo del tutor registrado"
         return result
-
-    result["email"] = send_email(
-        correo_tutor,
-        f"Recordatorio de pago — {nombre_alumno} | {nombre_escuela}",
-        _html_recordatorio(nombre_alumno, nombre_escuela, monto, dias_vencido),
-        nombre_escuela,
+    r = send_resend_email(
+        to      = correo_tutor,
+        subject = f"Recordatorio de pago — {nombre_alumno} | {nombre_escuela}",
+        html    = _html_recordatorio(nombre_alumno, nombre_escuela, monto, dias_vencido),
+        from_email = f"{nombre_escuela} <onboarding@resend.dev>",
     )
+    result["email"] = r.get("success", False)
+    result["error"] = r.get("error")
     return result
