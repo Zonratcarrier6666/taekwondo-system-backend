@@ -777,3 +777,85 @@ async def formularios_pendientes(
         in ("FIRMADO_PENDIENTE_VALIDACION", "RECHAZADO")
     ]
     return {"ok": True, "total": len(pendientes), "formularios": pendientes}
+
+# ─────────────────────────────────────────────────────────────
+#  HISTORIAL COMPLETO DE PAGOS POR ESCUELA
+#  GET /finanzas/pagos/escuela/{idescuela}/historial
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/escuela/{idescuela}/historial")
+async def historial_pagos(
+    idescuela:    int,
+    # ── Filtros ──────────────────────────────────────────
+    estatus:      Optional[int]  = Query(None, description="0=Pendiente 1=Pagado"),
+    id_tipo_pago: Optional[int]  = Query(None, description="1=Mensualidad 2=Inscripcion 3=Otro 4=Torneo"),
+    metodo_pago:  Optional[str]  = Query(None, description="Efectivo|Transferencia|Tarjeta"),
+    idalumno:     Optional[int]  = Query(None),
+    buscar:       Optional[str]  = Query(None, description="Nombre del alumno o concepto"),
+    fecha_desde:  Optional[str]  = Query(None, description="YYYY-MM-DD"),
+    fecha_hasta:  Optional[str]  = Query(None, description="YYYY-MM-DD"),
+    # ── Paginación ───────────────────────────────────────
+    pagina:       int            = Query(1,  ge=1),
+    por_pagina:   int            = Query(20, ge=1, le=100),
+    # ── Auth ─────────────────────────────────────────────
+    user: dict   = Depends(get_current_user),
+    db: Client   = Depends(get_db),
+):
+    _require_staff(user)
+
+    q = db.table("pagos").select(
+        "idpago, idalumno, idescuela, concepto, monto, estatus, "
+        "id_tipo_pago, metodo_pago, folio_recibo, "
+        "fecha_pago, fecharegistro, notas_adicionales, url_comprobante, "
+        "alumnos(nombres, apellidopaterno)"
+    ).eq("idescuela", idescuela)
+
+    # ── Aplicar filtros ──────────────────────────────────
+    if estatus is not None:
+        q = q.eq("estatus", estatus)
+    if id_tipo_pago is not None:
+        q = q.eq("id_tipo_pago", id_tipo_pago)
+    if metodo_pago:
+        q = q.eq("metodo_pago", metodo_pago)
+    if idalumno:
+        q = q.eq("idalumno", idalumno)
+    if fecha_desde:
+        q = q.gte("fecharegistro", fecha_desde)
+    if fecha_hasta:
+        # incluir todo el día hasta
+        q = q.lte("fecharegistro", f"{fecha_hasta}T23:59:59")
+
+    q = q.order("fecharegistro", desc=True)
+    r = q.execute()
+    todos = r.data or []
+
+    # ── Búsqueda por nombre/concepto (post-filter) ───────
+    if buscar:
+        buscar_lower = buscar.lower()
+        todos = [
+            p for p in todos
+            if buscar_lower in (p.get("concepto") or "").lower()
+            or buscar_lower in f"{(p.get('alumnos') or {}).get('nombres', '')} {(p.get('alumnos') or {}).get('apellidopaterno', '')}".lower()
+        ]
+
+    # ── Totales (antes de paginar) ───────────────────────
+    total          = len(todos)
+    total_monto    = sum(float(p.get("monto") or 0) for p in todos)
+    total_pagados  = sum(1 for p in todos if p.get("estatus") == int(EstatusPago.PAGADO))
+    total_pendientes = sum(1 for p in todos if p.get("estatus") == int(EstatusPago.PENDIENTE))
+
+    # ── Paginación ───────────────────────────────────────
+    offset = (pagina - 1) * por_pagina
+    pagina_data = todos[offset : offset + por_pagina]
+
+    return {
+        "ok":               True,
+        "total":            total,
+        "total_monto":      round(total_monto, 2),
+        "total_pagados":    total_pagados,
+        "total_pendientes": total_pendientes,
+        "pagina":           pagina,
+        "por_pagina":       por_pagina,
+        "paginas":          max(1, -(-total // por_pagina)),  # ceil division
+        "pagos":            pagina_data,
+    }
