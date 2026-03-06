@@ -622,20 +622,28 @@ async def notificar(
             get_ciclo_actual().value, link,
         )
     else:
+        # Con idpago específico: busca ese pago directo (sin filtrar estatus)
         if body.idpago:
-            p = db.table("pagos").select("*").eq("idpago", body.idpago).execute().data
+            p = db.table("pagos").select("*")\
+                .eq("idpago", body.idpago)\
+                .eq("idalumno", body.idalumno)\
+                .execute().data
         else:
-            p = db.table("pagos").select("*").eq("idalumno", body.idalumno)\
+            # Sin idpago: busca el pendiente más reciente del alumno
+            p = db.table("pagos").select("*")\
+                .eq("idalumno", body.idalumno)\
                 .eq("estatus", int(EstatusPago.PENDIENTE))\
                 .order("fecharegistro", desc=True).limit(1).execute().data
+
         if not p:
-            raise HTTPException(404, "Sin pagos pendientes para este alumno")
-        pago   = p[0]
+            raise HTTPException(404, "No se encontró el pago indicado para este alumno")
+
+        pago = p[0]
         result = notificar_pago_pendiente(
             correo, nombre, escuela["nombreescuela"],
             pago.get("concepto", "Pago pendiente"),
             _f(pago.get("monto")),
-            pago.get("folio_recibo", ""),
+            pago.get("folio_recibo", "—"),
             str(pago.get("fecha_pago", ""))[:10],
         )
 
