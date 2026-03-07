@@ -20,12 +20,14 @@ router = APIRouter(tags=["Cintas y Grados"])
 class CintaEscuelaCreate(BaseModel):
     nivelkupdan: str
     color: str
+    color_stripe: Optional[str] = None  # franja secundaria
     significado: Optional[str] = None
     orden: Optional[int] = None
 
 class CintaEscuelaUpdate(BaseModel):
     nivelkupdan: Optional[str] = None
     color: Optional[str] = None
+    color_stripe: Optional[str] = None
     significado: Optional[str] = None
     orden: Optional[int] = None
 
@@ -34,6 +36,7 @@ class CintaEscuelaOut(BaseModel):
     idescuela: Optional[int]
     nivelkupdan: str
     color: str
+    color_stripe: Optional[str]
     significado: Optional[str]
     orden: Optional[int]
 
@@ -130,6 +133,7 @@ async def crear_cinta_escuela(
         "idescuela": idescuela,
         "nivelkupdan": body.nivelkupdan,
         "color": body.color,
+        "color_stripe": body.color_stripe,
         "significado": body.significado,
         "orden": body.orden,
     }).execute()
