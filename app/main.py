@@ -24,6 +24,7 @@ from routers import (
     asistencia,
     asistencia_torneo,
     brackets,
+    inscripcion_publica,
 )
 
 # Scheduler
@@ -38,6 +39,7 @@ tags_metadata = [
     {"name": "Exámenes y Grados",           "description": "Control de eventos de promoción y avance técnico."},
     {"name": "Finanzas y Cobranza",         "description": "Caja, mensualidades masivas y recibos."},
     {"name": "Torneos y Competencias",      "description": "Logística, categorías, inscripciones y validación QR."},
+    {"name": "Inscripción Pública",        "description": "Formulario público de registro de alumnos, sin autenticación."},
     {"name": "Mantenimiento y Debug",       "description": "Utilidades de prueba para desarrollo."},
 ]
 
@@ -89,7 +91,10 @@ app.include_router(asistencia.router,    prefix="/asistencia-torneo", tags=["Tor
 # 8. Brackets y combates
 app.include_router(brackets.router,      tags=["Torneos y Competencias"])
 
-# 9. Pruebas
+# 9. Inscripción pública (sin auth, acceso libre)
+app.include_router(inscripcion_publica.router, prefix="/inscripcion", tags=["Inscripción Pública"])
+
+# 10. Pruebas
 app.include_router(test_correos.router,  prefix="/debug",         tags=["Mantenimiento y Debug"])
 
 # ─── Endpoint para forzar el scheduler manualmente ───────────
