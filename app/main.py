@@ -92,7 +92,7 @@ app.include_router(asistencia.router,    prefix="/asistencia-torneo", tags=["Tor
 app.include_router(brackets.router,      tags=["Torneos y Competencias"])
 
 # 9. Inscripción pública (sin auth, acceso libre)
-app.include_router(inscripcion_publica.router, prefix="/inscripcion", tags=["Inscripción Pública"])
+app.include_router(inscripciones_publicas.router, prefix="/inscripcion", tags=["Inscripción Pública"])
 
 # 10. Pruebas
 app.include_router(test_correos.router,  prefix="/debug",         tags=["Mantenimiento y Debug"])
