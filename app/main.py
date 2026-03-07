@@ -24,7 +24,7 @@ from routers import (
     asistencia,
     asistencia_torneo,
     brackets,
-    inscripcion_publica,
+    inscripciones_publicas,
 )
 
 # Scheduler
