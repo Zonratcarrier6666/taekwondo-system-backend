@@ -25,6 +25,7 @@ from routers import (
     asistencia_torneo,
     brackets,
     inscripciones_publicas,
+    areas_checkin,
 )
 
 # Scheduler
@@ -90,11 +91,12 @@ app.include_router(torneos.router,       prefix="/torneos",       tags=["Torneos
 app.include_router(asistencia.router,    prefix="/asistencia-torneo", tags=["Torneos y Competencias"])
 # 8. Brackets y combates
 app.include_router(brackets.router,      tags=["Torneos y Competencias"])
-
-# 9. Inscripción pública (sin auth, acceso libre)
+# 9. Check-in y validación QR en torneos
+app.include_router(areas_checkin.router, prefix="/torneos-v2", tags=["Torneos y Competencias"])
+# 10. Inscripción pública (sin auth, acceso libre)
 app.include_router(inscripciones_publicas.router, prefix="/inscripcion", tags=["Inscripción Pública"])
 
-# 10. Pruebas
+# 11. Pruebas
 app.include_router(test_correos.router,  prefix="/debug",         tags=["Mantenimiento y Debug"])
 
 # ─── Endpoint para forzar el scheduler manualmente ───────────
