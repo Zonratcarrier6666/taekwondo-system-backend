@@ -65,6 +65,88 @@ def _get_idescuela(user: dict, db: Client) -> int:
     raise HTTPException(status_code=403, detail="No tienes una escuela asignada en tu perfil.")
 
 
+def _get_cintas_escuela(id_escuela: int, db: Client) -> dict:
+    """
+    Devuelve un dict idgrado → datos de cinta, usando el catálogo
+    propio de la escuela si existe, o el catálogo global como fallback.
+    Incluye color, color_stripe, nivelkupdan y orden para renderizado exacto.
+    """
+    propias = db.table("cintasgrados")\
+        .select("idgrado, nivelkupdan, color, color_stripe, orden")\
+        .eq("idescuela", id_escuela)\
+        .order("orden", nullsfirst=False)\
+        .order("idgrado")\
+        .execute()
+
+    if propias.data:
+        return {c["idgrado"]: c for c in propias.data}
+
+    # Fallback catálogo global
+    globales = db.table("cintasgrados")\
+        .select("idgrado, nivelkupdan, color, color_stripe, orden")\
+        .is_("idescuela", "null")\
+        .order("idgrado")\
+        .execute()
+
+    return {c["idgrado"]: c for c in (globales.data or [])}
+
+
+def _distribucion_cintas(alumnos: list, catalogo: dict) -> list:
+    """
+    Calcula la distribución de cintas agrupando por idgrado (no por color),
+    enriqueciendo con datos completos del catálogo propio de la escuela.
+    Respeta color_stripe para cintas con franja.
+    """
+    cintas_map: dict = {}
+    sin_grado = 0
+
+    for a in alumnos:
+        idgrado = a.get("idgradoactual")
+        if not idgrado:
+            sin_grado += 1
+            continue
+
+        # Preferir datos del catálogo propio si existe
+        cinta = catalogo.get(idgrado)
+        if not cinta:
+            # Intentar desde el join embebido
+            g = a.get("grados") or {}
+            if not g:
+                sin_grado += 1
+                continue
+            cinta = {
+                "idgrado":     idgrado,
+                "nivelkupdan": g.get("nivelkupdan", ""),
+                "color":       g.get("color", "Blanca"),
+                "color_stripe": g.get("color_stripe"),
+                "orden":       g.get("orden", idgrado),
+            }
+
+        key = idgrado  # agrupar por ID, no por color
+        if key not in cintas_map:
+            cintas_map[key] = {
+                "idgrado":     cinta["idgrado"],
+                "color":       cinta["color"],
+                "color_stripe": cinta.get("color_stripe"),
+                "nivelkupdan": cinta["nivelkupdan"],
+                "orden":       cinta.get("orden") or cinta["idgrado"],
+                "count":       0,
+            }
+        cintas_map[key]["count"] += 1
+
+    # Ordenar por orden de la escuela
+    resultado = sorted(cintas_map.values(), key=lambda x: x["orden"])
+
+    # Agregar "Sin grado" si hay alumnos sin asignar
+    if sin_grado:
+        resultado.append({
+            "idgrado": 0, "color": "Gris", "color_stripe": None,
+            "nivelkupdan": "Sin grado", "orden": 9999, "count": sin_grado,
+        })
+
+    return resultado
+
+
 # ─────────────────────────────────────────────────────────────
 #  1. DASHBOARD ESCUELA
 # ─────────────────────────────────────────────────────────────
@@ -147,23 +229,14 @@ async def get_school_stats(
     ]
 
     # ── DISTRIBUCIÓN CINTAS ────────────────────────────────────
+    catalogo_cintas = _get_cintas_escuela(id_escuela, db)
     cintas_res = db.table("alumnos")\
-        .select("idgradoactual, grados:cintasgrados(idgrado, color, nivelkupdan)")\
+        .select("idalumno, idgradoactual, grados:cintasgrados(idgrado, color, color_stripe, nivelkupdan, orden)")\
         .eq("idescuela", id_escuela).eq("estatus", 1).execute()
 
-    cintas_map: dict = {}
-    for a in cintas_res.data:
-        g = a.get("grados")
-        if g:
-            key = g["color"]
-            if key not in cintas_map:
-                cintas_map[key] = {"idgrado": g["idgrado"], "color": g["color"],
-                                    "nivelkupdan": g["nivelkupdan"], "count": 0}
-            cintas_map[key]["count"] += 1
-
     distribucion_cintas = [
-        BeltStat(**v)
-        for v in sorted(cintas_map.values(), key=lambda x: x["idgrado"])
+        BeltStat(**{k: v for k, v in c.items() if k in ("idgrado","color","color_stripe","nivelkupdan","count")})
+        for c in _distribucion_cintas(cintas_res.data, catalogo_cintas)
     ]
 
     # ── DEUDA VENCIDA (+30 días) ───────────────────────────────
@@ -495,25 +568,16 @@ async def get_professor_stats(
 
     # IDs de mis alumnos activos
     mis_alumnos_res = db.table("alumnos")\
-        .select("idalumno, nombres, apellidopaterno, fotoalumno, fechanacimiento, estatus, idgradoactual, grados:cintasgrados(idgrado, color, nivelkupdan)")\
+        .select("idalumno, nombres, apellidopaterno, fotoalumno, fechanacimiento, estatus, idgradoactual, grados:cintasgrados(idgrado, color, color_stripe, nivelkupdan, orden)")\
         .eq("idprofesor", id_profesor).eq("estatus", 1).execute()
 
     mis_ids = [a["idalumno"] for a in mis_alumnos_res.data]
 
     # ── DISTRIBUCIÓN CINTAS ────────────────────────────────────
-    cintas_map: dict = {}
-    for a in mis_alumnos_res.data:
-        g = a.get("grados")
-        if g:
-            key = g["color"]
-            if key not in cintas_map:
-                cintas_map[key] = {"idgrado": g["idgrado"], "color": g["color"],
-                                    "nivelkupdan": g["nivelkupdan"], "count": 0}
-            cintas_map[key]["count"] += 1
-
+    catalogo_cintas_prof = _get_cintas_escuela(id_escuela, db)
     distribucion_cintas = [
-        BeltStat(**v)
-        for v in sorted(cintas_map.values(), key=lambda x: x["idgrado"])
+        BeltStat(**{k: v for k, v in c.items() if k in ("idgrado","color","color_stripe","nivelkupdan","count")})
+        for c in _distribucion_cintas(mis_alumnos_res.data, catalogo_cintas_prof)
     ]
 
     # ── ASISTENCIA ─────────────────────────────────────────────

@@ -19,8 +19,9 @@ async def registrar_alumno_predictivo(
 ):
     """
     Registra los datos básicos de un alumno.
-    Este es el PASO 1. El frontend recibe el objeto creado con su ID,
-    y luego decide si subir la foto inmediatamente o dejarlo para después.
+    - Si hay UN solo profesor en la escuela → se asigna automáticamente.
+    - Si hay MÁS de uno → se guarda sin profesor (idprofesor = null).
+      El alumno queda bloqueado hasta asignarse vía PUT /{idalumno}/asignar-profesor.
     """
     rol = current_user.get("rol")
     id_usuario = current_user.get("idusuario")
@@ -32,18 +33,39 @@ async def registrar_alumno_predictivo(
     id_profesor = None
 
     if rol == UserRole.PROFESOR:
+        # Profesor siempre se asigna a sí mismo
         profe_data = db.table("profesores").select("idprofesor, idescuela").eq("idusuario", id_usuario).execute()
         if not profe_data.data:
             raise HTTPException(status_code=404, detail="Perfil de profesor no encontrado.")
         id_profesor = profe_data.data[0]["idprofesor"]
-        id_escuela = profe_data.data[0]["idescuela"]
+        id_escuela  = profe_data.data[0]["idescuela"]
         
     elif rol == UserRole.ESCUELA:
         escuela_data = db.table("datosescuela").select("idescuela").eq("idusuario", id_usuario).execute()
         if not escuela_data.data:
             raise HTTPException(status_code=404, detail="Perfil de escuela no encontrado.")
         id_escuela = escuela_data.data[0]["idescuela"]
-        id_profesor = alumno.idprofesor
+
+        # Contar profesores activos de la escuela
+        profesores_res = db.table("profesores")\
+            .select("idprofesor")\
+            .eq("idescuela", id_escuela)\
+            .execute()
+        profesores = profesores_res.data or []
+
+        if len(profesores) == 1:
+            # Auto-asignar al único profesor
+            id_profesor = profesores[0]["idprofesor"]
+        elif len(profesores) > 1:
+            # Si el frontend manda uno explícitamente, usarlo; si no, null (pendiente)
+            id_profesor = alumno.idprofesor if alumno.idprofesor else None
+        else:
+            # Sin profesores — bloquear registro
+            raise HTTPException(
+                status_code=400,
+                detail="No puedes registrar alumnos porque la escuela no tiene profesores registrados. "
+                       "Agrega al menos un profesor primero."
+            )
 
     data_final = alumno.model_dump(mode='json')
     data_final["idescuela"] = id_escuela
@@ -51,7 +73,10 @@ async def registrar_alumno_predictivo(
 
     try:
         result = db.table("alumnos").insert(data_final).execute()
-        return result.data[0]
+        alumno_creado = result.data[0]
+        # Indicar al frontend si el alumno quedó sin profesor
+        alumno_creado["_sin_profesor"] = id_profesor is None
+        return alumno_creado
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error al procesar registro: {str(e)}")
 
@@ -179,7 +204,136 @@ async def actualizar_alumno(
         raise HTTPException(status_code=400, detail="No hay datos para actualizar.")
     try:
         db.table("alumnos").update(update_dict).eq("idalumno", idalumno).execute()
-        # Siempre retornamos vía obtener_detalle_alumno para garantizar datos financieros
         return await obtener_detalle_alumno(idalumno, current_user, db)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error al actualizar: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────
+#  HELPER — verifica que el alumno tenga profesor asignado
+#  Llamar desde pagos, torneos, etc. antes de operar
+# ─────────────────────────────────────────────────────────────
+async def verificar_alumno_activo(idalumno: int, db: Client) -> dict:
+    """
+    Lanza 403 si el alumno no tiene profesor asignado.
+    Usar en endpoints de pagos, inscripciones, exámenes, etc.
+
+    Ejemplo de uso en pagos.py:
+        from app.routers.alumnos import verificar_alumno_activo
+        await verificar_alumno_activo(idalumno, db)
+    """
+    res = db.table("alumnos").select("idalumno, idprofesor, nombres, apellidopaterno")\
+        .eq("idalumno", idalumno).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado.")
+    alumno = res.data[0]
+    if not alumno.get("idprofesor"):
+        nombre = f"{alumno.get('nombres', '')} {alumno.get('apellidopaterno', '')}".strip()
+        raise HTTPException(
+            status_code=403,
+            detail=f"El alumno '{nombre}' no tiene profesor asignado. "
+                   f"Asígnalo a un profesor antes de continuar."
+        )
+    return alumno
+
+
+# ─────────────────────────────────────────────────────────────
+#  ASIGNAR PROFESOR A ALUMNO
+# ─────────────────────────────────────────────────────────────
+@router.put("/{idalumno}/asignar-profesor", response_model=Alumno)
+async def asignar_profesor(
+    idalumno:    int,
+    idprofesor:  int,
+    current_user: dict = Depends(get_current_user),
+    db: Client = Depends(get_db)
+):
+    """
+    Asigna o cambia el profesor de un alumno.
+    Solo rol Escuela puede hacerlo.
+    El profesor debe pertenecer a la misma escuela del alumno.
+    """
+    rol = current_user.get("rol")
+    if rol != UserRole.ESCUELA:
+        raise HTTPException(status_code=403, detail="Solo la escuela puede asignar profesores.")
+
+    # Verificar que el alumno existe y pertenece a esta escuela
+    alumno_res = db.table("alumnos").select("idalumno, idescuela, nombres, apellidopaterno")\
+        .eq("idalumno", idalumno).execute()
+    if not alumno_res.data:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado.")
+    alumno = alumno_res.data[0]
+
+    id_usuario = current_user.get("idusuario")
+    escuela_res = db.table("datosescuela").select("idescuela")\
+        .eq("idusuario", id_usuario).execute()
+    if not escuela_res.data:
+        raise HTTPException(status_code=404, detail="Escuela no encontrada.")
+    id_escuela = escuela_res.data[0]["idescuela"]
+
+    if alumno["idescuela"] != id_escuela:
+        raise HTTPException(status_code=403, detail="El alumno no pertenece a tu escuela.")
+
+    # Verificar que el profesor pertenece a la misma escuela
+    profe_res = db.table("profesores").select("idprofesor, idescuela")\
+        .eq("idprofesor", idprofesor).execute()
+    if not profe_res.data:
+        raise HTTPException(status_code=404, detail="Profesor no encontrado.")
+    if profe_res.data[0]["idescuela"] != id_escuela:
+        raise HTTPException(status_code=403, detail="El profesor no pertenece a tu escuela.")
+
+    # Asignar
+    db.table("alumnos").update({"idprofesor": idprofesor})\
+        .eq("idalumno", idalumno).execute()
+
+    return await obtener_detalle_alumno(idalumno, current_user, db)
+
+
+# ─────────────────────────────────────────────────────────────
+#  LISTAR PROFESORES DE LA ESCUELA (para el selector del frontend)
+# ─────────────────────────────────────────────────────────────
+@router.get("/escuela/profesores")
+async def listar_profesores_escuela(
+    current_user: dict = Depends(get_current_user),
+    db: Client = Depends(get_db)
+):
+    """
+    Devuelve los profesores de la escuela del usuario autenticado.
+    Útil para el selector al asignar profesor a un alumno.
+    """
+    rol = current_user.get("rol")
+    id_usuario = current_user.get("idusuario")
+
+    if rol == UserRole.ESCUELA:
+        escuela_res = db.table("datosescuela").select("idescuela")\
+            .eq("idusuario", id_usuario).execute()
+        if not escuela_res.data:
+            raise HTTPException(status_code=404, detail="Escuela no encontrada.")
+        id_escuela = escuela_res.data[0]["idescuela"]
+    elif rol == UserRole.PROFESOR:
+        profe_res = db.table("profesores").select("idescuela")\
+            .eq("idusuario", id_usuario).execute()
+        if not profe_res.data:
+            raise HTTPException(status_code=404, detail="Perfil no encontrado.")
+        id_escuela = profe_res.data[0]["idescuela"]
+    else:
+        raise HTTPException(status_code=403, detail="Sin permisos.")
+
+    profesores_res = db.table("profesores")\
+        .select("idprofesor, usuarios(username, nombre)")\
+        .eq("idescuela", id_escuela)\
+        .execute()
+
+    resultado = []
+    for p in profesores_res.data or []:
+        u = p.get("usuarios") or {}
+        resultado.append({
+            "idprofesor": p["idprofesor"],
+            "nombre":     u.get("nombre") or u.get("username") or f"Profesor #{p['idprofesor']}",
+            "username":   u.get("username", ""),
+        })
+
+    return {
+        "ok":         True,
+        "profesores": resultado,
+        "total":      len(resultado),
+    }
