@@ -763,8 +763,8 @@ async def matchmaking_preview(
         "  cintasgrados(nivelkupdan, color, orden)), "
         "datosescuela!inscripciones_torneo_idescuela_fkey(nombreescuela)"
     ).eq("idtorneo", idtorneo)\
-     .eq("estatus_pago", "Pagado")\
-     .eq("estatus_checkin", True)
+     .eq("estatus_checkin", True)\
+     .or_("estatus_pago.eq.Pagado,estatus_pago.eq.pagado,estatus_pago.ilike.pagado")
 
     if idcategoria:
         q = q.eq("idcategoria", idcategoria)
@@ -968,4 +968,110 @@ async def asignar_combate_a_area(
         "mensaje": f"Combate {idcombate} asignado a {area.data[0]['nombre_area']}",
         "idarea":  idarea,
         "idjuez":  juez_area,
+    }
+
+
+@router.post("/torneos/{idtorneo}/matchmaking/confirmar",
+             summary="Confirmar matchmaking y guardar combates en BD")
+async def matchmaking_confirmar(
+    idtorneo: int,
+    db:   Client = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Genera y guarda en la tabla combates todos los enfrentamientos
+    del matchmaking preview. Si ya existen combates pendientes los elimina
+    y los regenera para que siempre se parta de un estado limpio.
+    """
+    _require_roles(user, ["SuperAdmin"])
+
+    # ── 1. Verificar torneo ──────────────────────────────────
+    torneo_res = db.table("torneos").select("idtorneo, tipo_torneo, estatus")\
+        .eq("idtorneo", idtorneo).execute()
+    if not torneo_res.data:
+        raise HTTPException(404, "Torneo no encontrado")
+    torneo = torneo_res.data[0]
+    if torneo["estatus"] not in (2, "en_curso", "activo"):
+        raise HTTPException(400, "El torneo debe estar en curso para confirmar el matchmaking")
+
+    # ── 2. Traer asistentes pagados con check-in ─────────────
+    asistentes_res = db.table("inscripciones_torneo").select(
+        "idinscripcion, idcategoria, idescuela, peso_declarado, peso_bascula, "
+        "alumnos(nombres, apellidopaterno)"
+    ).eq("idtorneo", idtorneo)\
+     .eq("estatus_checkin", True)\
+     .or_("estatus_pago.eq.Pagado,estatus_pago.eq.pagado")\
+     .execute()
+
+    asistentes = asistentes_res.data or []
+    if not asistentes:
+        raise HTTPException(400, "No hay competidores con check-in para generar combates")
+
+    # ── 3. Eliminar combates pendientes anteriores del torneo ─
+    db.table("combates")\
+        .delete()\
+        .eq("idtorneo", idtorneo)\
+        .eq("estatus", "pendiente")\
+        .execute()
+
+    # ── 4. Agrupar por categoría ─────────────────────────────
+    por_cat: dict = {}
+    for a in asistentes:
+        cid = a.get("idcategoria") or 0
+        por_cat.setdefault(cid, []).append(a)
+
+    # ── 5. Generar combates mezclando escuelas ───────────────
+    def _mezclar_por_escuela(participantes):
+        por_escuela: dict = {}
+        for p in participantes:
+            eid = p.get("idescuela", 0)
+            por_escuela.setdefault(eid, []).append(p)
+        mezclados = []
+        listas = list(por_escuela.values())
+        i = 0
+        while any(listas):
+            bucket = listas[i % len(listas)]
+            if bucket:
+                mezclados.append(bucket.pop(0))
+            i += 1
+        return mezclados
+
+    combates_creados = []
+    total_combates   = 0
+
+    for idcategoria, participantes in por_cat.items():
+        mezclados = _mezclar_por_escuela(participantes)
+
+        for idx in range(0, len(mezclados), 2):
+            a = mezclados[idx]
+            b = mezclados[idx + 1] if idx + 1 < len(mezclados) else None
+
+            nuevo_combate = {
+                "idtorneo":         idtorneo,
+                "idcategoria":      idcategoria if idcategoria != 0 else None,
+                "id_competidor_1":  a["idinscripcion"],
+                "id_competidor_2":  b["idinscripcion"] if b else None,
+                "ronda":            1,
+                "estatus":          "pendiente",
+                "es_bye":           b is None,
+            }
+
+            res = db.table("combates").insert(nuevo_combate).execute()
+            if res.data:
+                idcombate = res.data[0]["idcombate"]
+                combates_creados.append({
+                    "idcombate":       idcombate,
+                    "idcategoria":     idcategoria,
+                    "competidor_a":    f"{a['alumnos']['nombres']} {a['alumnos']['apellidopaterno']}".strip() if a.get("alumnos") else str(a["idinscripcion"]),
+                    "competidor_b":    f"{b['alumnos']['nombres']} {b['alumnos']['apellidopaterno']}".strip() if b and b.get("alumnos") else ("BYE" if not b else str(b["idinscripcion"])),
+                    "es_bye":          b is None,
+                })
+                total_combates += 1
+
+    return {
+        "ok":             True,
+        "idtorneo":       idtorneo,
+        "total_combates": total_combates,
+        "combates":       combates_creados,
+        "mensaje":        f"✅ {total_combates} combates generados y guardados correctamente",
     }
