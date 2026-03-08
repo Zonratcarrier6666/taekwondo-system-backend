@@ -774,7 +774,31 @@ async def matchmaking_preview(
 ):
     _require_roles(user, ["SuperAdmin"])
 
-    # Traer asistentes pagados con check-in
+    def _detectar_advertencia(a, b):
+        if not b:
+            return None
+        advertencias = []
+        if a.get("edad") and b.get("edad"):
+            diff_edad = abs(a["edad"] - b["edad"])
+            if diff_edad >= 2:
+                advertencias.append(f"Diferencia de edad: {diff_edad} años")
+        if a.get("peso") and b.get("peso"):
+            diff_peso = abs(a["peso"] - b["peso"])
+            if diff_peso >= 10:
+                advertencias.append(f"Diferencia de peso: {diff_peso:.1f} kg")
+        return " | ".join(advertencias) if advertencias else None
+
+    # ── 1. Verificar si ya hay combates pendientes guardados ────
+    combates_q = db.table("combates").select(
+        "idcombate, idcategoria, id_competidor_1, id_competidor_2, ronda, estatus, es_bye"
+    ).eq("idtorneo", idtorneo).eq("ronda", 1).eq("estatus", "pendiente")
+
+    if idcategoria:
+        combates_q = combates_q.eq("idcategoria", idcategoria)
+
+    combates_guardados = combates_q.execute().data or []
+
+    # ── 2. Traer datos de inscripciones para enriquecer ─────────
     q = db.table("inscripciones_torneo").select(
         "idinscripcion, idcategoria, peso_declarado, peso_bascula, idescuela, "
         "num_combates_realizados, "
@@ -790,13 +814,13 @@ async def matchmaking_preview(
 
     asistentes = q.execute().data or []
 
-    # Enriquecer con datos calculados
-    enriquecidos = []
+    # Mapa idinscripcion → datos enriquecidos
+    mapa_insc: dict = {}
     for i in asistentes:
         al = i.get("alumnos") or {}
         cg = al.get("cintasgrados") or {}
         esc = i.get("datosescuela") or {}
-        enriquecidos.append({
+        mapa_insc[i["idinscripcion"]] = {
             "idinscripcion":   i["idinscripcion"],
             "idcategoria":     i.get("idcategoria"),
             "nombre":          f"{al.get('nombres','')} {al.get('apellidopaterno','')}".strip(),
@@ -808,9 +832,55 @@ async def matchmaking_preview(
             "orden_cinta":     cg.get("orden", 0),
             "escuela":         esc.get("nombreescuela", ""),
             "idescuela":       i.get("idescuela"),
-        })
+        }
 
-    # Generar emparejamientos sugeridos separando por escuela
+    # ── 3. Si hay combates guardados, leer de BD ─────────────────
+    if combates_guardados:
+        por_cat: dict = {}
+        for c in combates_guardados:
+            cid = c.get("idcategoria") or 0
+            por_cat.setdefault(cid, []).append(c)
+
+        resultado = []
+        for cid, combates_cat in por_cat.items():
+            cat_res = db.table("torneo_categorias").select("nombre_categoria")\
+                .eq("idcategoria", cid).execute()
+            nombre_cat = cat_res.data[0]["nombre_categoria"] if cat_res.data else f"Categoría {cid}"
+
+            total_competidores = sum(
+                (1 if c["id_competidor_1"] else 0) + (1 if c["id_competidor_2"] else 0)
+                for c in combates_cat
+            )
+
+            enfrentamientos = []
+            for idx, c in enumerate(combates_cat):
+                comp_a = mapa_insc.get(c["id_competidor_1"]) if c["id_competidor_1"] else None
+                comp_b = mapa_insc.get(c["id_competidor_2"]) if c["id_competidor_2"] else None
+                enfrentamientos.append({
+                    "posicion":     idx + 1,
+                    "competidor_a": comp_a,
+                    "competidor_b": comp_b,
+                    "es_bye":       c.get("es_bye", comp_b is None),
+                    "advertencia":  _detectar_advertencia(comp_a, comp_b) if comp_a else None,
+                })
+
+            resultado.append({
+                "idcategoria":      cid,
+                "nombre_categoria": nombre_cat,
+                "total":            total_competidores,
+                "enfrentamientos":  enfrentamientos,
+            })
+
+        return {
+            "ok":        True,
+            "idtorneo":  idtorneo,
+            "categorias": resultado,
+            "nota": "Emparejamientos guardados. Usa el endpoint de reasignar para editarlos antes de confirmar.",
+        }
+
+    # ── 4. Sin combates guardados: generar dinámicamente ────────
+    enriquecidos = list(mapa_insc.values())
+
     def _emparejar_preview(participantes):
         por_escuela: dict = {}
         for p in participantes:
@@ -831,45 +901,29 @@ async def matchmaking_preview(
             a = mezclados[idx]
             b = mezclados[idx + 1] if idx + 1 < len(mezclados) else None
             pares.append({
-                "posicion": idx // 2 + 1,
+                "posicion":     idx // 2 + 1,
                 "competidor_a": a,
-                "competidor_b": b,   # None = BYE
-                "es_bye": b is None,
-                # Advertencia si hay gran diferencia de edad/peso (para modal local)
-                "advertencia": _detectar_advertencia(a, b),
+                "competidor_b": b,
+                "es_bye":       b is None,
+                "advertencia":  _detectar_advertencia(a, b),
             })
         return pares
 
-    def _detectar_advertencia(a, b):
-        if not b:
-            return None
-        advertencias = []
-        if a.get("edad") and b.get("edad"):
-            diff_edad = abs(a["edad"] - b["edad"])
-            if diff_edad >= 2:
-                advertencias.append(f"Diferencia de edad: {diff_edad} años")
-        if a.get("peso") and b.get("peso"):
-            diff_peso = abs(a["peso"] - b["peso"])
-            if diff_peso >= 10:
-                advertencias.append(f"Diferencia de peso: {diff_peso:.1f} kg")
-        return " | ".join(advertencias) if advertencias else None
-
-    # Agrupar por categoría
-    por_cat: dict = {}
+    por_cat_dyn: dict = {}
     for p in enriquecidos:
         cid = p["idcategoria"] or 0
-        por_cat.setdefault(cid, []).append(p)
+        por_cat_dyn.setdefault(cid, []).append(p)
 
     resultado = []
-    for cid, participantes in por_cat.items():
+    for cid, participantes in por_cat_dyn.items():
         cat_res = db.table("torneo_categorias").select("nombre_categoria")\
             .eq("idcategoria", cid).execute()
         nombre_cat = cat_res.data[0]["nombre_categoria"] if cat_res.data else f"Categoría {cid}"
         resultado.append({
-            "idcategoria":     cid,
+            "idcategoria":      cid,
             "nombre_categoria": nombre_cat,
-            "total":           len(participantes),
-            "enfrentamientos": _emparejar_preview(participantes),
+            "total":            len(participantes),
+            "enfrentamientos":  _emparejar_preview(participantes),
         })
 
     return {
@@ -1026,14 +1080,22 @@ async def matchmaking_confirmar(
     if not asistentes:
         raise HTTPException(400, "No hay competidores con check-in para generar combates")
 
-    # ── 3. Eliminar combates pendientes anteriores del torneo ─
-    db.table("combates")\
-        .delete()\
-        .eq("idtorneo", idtorneo)\
-        .eq("estatus", "pendiente")\
-        .execute()
+    # ── 3. Verificar si ya hay combates pendientes (reasignados) ─
+    combates_existentes = db.table("combates").select("idcombate")\
+        .eq("idtorneo", idtorneo).eq("estatus", "pendiente").execute()
 
-    # ── 4. Agrupar por categoría ─────────────────────────────
+    if combates_existentes.data:
+        # Ya hay combates guardados (posiblemente reasignados) — solo confirmar estatus
+        total_combates = len(combates_existentes.data)
+        return {
+            "ok":             True,
+            "idtorneo":       idtorneo,
+            "total_combates": total_combates,
+            "combates":       [],
+            "mensaje":        f"✅ {total_combates} combates confirmados (se respetan las reasignaciones)",
+        }
+
+    # ── 4. Sin combates previos: generar desde cero ──────────
     por_cat: dict = {}
     for a in asistentes:
         cid = a.get("idcategoria") or 0
