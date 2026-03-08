@@ -4,7 +4,7 @@
 # ============================================================
 
 from pydantic import BaseModel, field_validator
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 from enum import Enum
 
@@ -31,55 +31,36 @@ class GeneroFiltro(str, Enum):
 
 
 # ─── Crear / Editar Torneo ───────────────────────────────────
-
-class CrearTorneo(BaseModel):
-    nombre:            str
-    fecha:             str           # "YYYY-MM-DD"
-    hora_inicio:       str = "09:00"
-    sede:              str
-    ciudad:            str
-    monto_inscripcion: float
-
-    # NUEVO: tipo de torneo
-    tipo_torneo:       TipoTorneo = TipoTorneo.COMPETENCIA
-
-    # NUEVO: áreas/rings de la sede
-    num_areas:         int = 1
-
-    # NUEVO: límite de combates por competidor (local = 3, competencia = sin límite)
-    max_combates_por_competidor: int = 3
-
-    # Requisitos de elegibilidad
-    cinta_minima:      Optional[int]   = None
-    cinta_maxima:      Optional[int]   = None
-    edad_minima:       Optional[int]   = None
-    edad_maxima:       Optional[int]   = None
-    peso_minimo:       Optional[float] = None
-    peso_maximo:       Optional[float] = None
-    genero:            GeneroFiltro = GeneroFiltro.AMBOS
-
-    descripcion:       Optional[str] = None
-    max_participantes: Optional[int] = None
-
-    @field_validator("monto_inscripcion")
-    @classmethod
-    def monto_pos(cls, v):
-        if v < 0: raise ValueError("El monto no puede ser negativo")
-        return v
-
-    @field_validator("fecha")
-    @classmethod
-    def fecha_valida(cls, v):
-        try: datetime.strptime(v, "%Y-%m-%d")
-        except: raise ValueError("Formato de fecha: YYYY-MM-DD")
-        return v
-
-    @field_validator("num_areas")
-    @classmethod
-    def areas_validas(cls, v):
-        if v < 1: raise ValueError("Debe haber al menos 1 área de combate")
-        if v > 20: raise ValueError("Máximo 20 áreas por torneo")
-        return v
+class CategoriaInput(BaseModel):
+    nombre_categoria: str
+    edad_min:         Optional[int]   = None
+    edad_max:         Optional[int]   = None
+    peso_min:         Optional[float] = None
+    peso_max:         Optional[float] = None
+    genero:           Optional[str]   = "A"
+    grados_permitidos: Optional[list] = None   # ej: [1, 2, 3]
+    orden_ejecucion:  Optional[int]   = 1
+class CrearTorneo(BaseModel):          # ← tu clase existente, solo añade lo marcado con # ← NUEVO
+    nombre:              str
+    fecha:               str
+    hora_inicio:         Optional[str]   = "09:00"
+    sede:                str
+    ciudad:              Optional[str]   = None
+    descripcion:         Optional[str]   = None
+    tipo_torneo:         Optional[str]   = "competencia"   # ← NUEVO (si no lo tenías)
+    monto_inscripcion:   Optional[float] = 0.0
+    costo_inscripcion:   Optional[float] = 0.0
+    cinta_minima:        Optional[int]   = None
+    cinta_maxima:        Optional[int]   = None
+    edad_minima:         Optional[int]   = None
+    edad_maxima:         Optional[int]   = None
+    peso_minimo:         Optional[float] = None
+    peso_maximo:         Optional[float] = None
+    genero:              Optional[str]   = "A"
+    max_participantes:   Optional[int]   = None
+    num_areas:           Optional[int]   = 1               # ← NUEVO
+    max_combates_por_competidor: Optional[int] = 3         # ← NUEVO
+    categorias:          Optional[List[CategoriaInput]] = []  # ← NUEVO ⭐
 
 
 class EditarTorneo(BaseModel):

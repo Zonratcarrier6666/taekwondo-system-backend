@@ -71,8 +71,6 @@ async def crear_torneo(
 ):
     _require_roles(user, ["SuperAdmin"])
 
-    # Nota técnica: Si la DB espera un entero, usamos IDs. 
-    # Mapeo sugerido: 1: PROXIMO, 2: EN CURSO, 3: FINALIZADO
     torneo = {
         "nombre":             body.nombre,
         "fecha":              body.fecha,
@@ -80,24 +78,64 @@ async def crear_torneo(
         "sede":               body.sede,
         "ciudad":             body.ciudad,
         "monto_inscripcion":  body.monto_inscripcion,
+        "costo_inscripcion":  body.costo_inscripcion,
         "cinta_minima":       body.cinta_minima,
         "cinta_maxima":       body.cinta_maxima,
         "edad_minima":        body.edad_minima,
         "edad_maxima":        body.edad_maxima,
         "peso_minimo":        body.peso_minimo,
         "peso_maximo":        body.peso_maximo,
-        "genero":             body.genero.value,
+        "genero":             body.genero if isinstance(body.genero, str) else body.genero.value,
         "descripcion":        body.descripcion,
         "max_participantes":  body.max_participantes,
-        "estatus":            1, # Forzamos entero 1 (Próximo) para evitar error 22P02
+        "tipo_torneo":        body.tipo_torneo,          # ← NUEVO
+        "num_areas":          body.num_areas,            # ← NUEVO
+        "max_combates_por_competidor": body.max_combates_por_competidor,  # ← NUEVO
+        "estatus":            1,
         "creado_por":         user.get("idusuario"),
     }
-    
+
     try:
         r = db.table("torneos").insert(torneo).execute()
-        return {"ok": True, "torneo": r.data[0] if r.data else torneo}
+        if not r.data:
+            raise HTTPException(status_code=500, detail="No se pudo crear el torneo.")
+
+        torneo_creado = r.data[0]
+        idtorneo = torneo_creado["idtorneo"]
+
+        # ─── NUEVO: Insertar categorías si vienen en el body ─────────
+        categorias_creadas = []
+        if body.categorias:
+            for i, cat in enumerate(body.categorias):
+                cat_row = {
+                    "idtorneo":         idtorneo,
+                    "nombre_categoria": cat.nombre_categoria,
+                    "edad_min":         cat.edad_min,
+                    "edad_max":         cat.edad_max,
+                    "peso_min":         cat.peso_min,
+                    "peso_max":         cat.peso_max,
+                    "genero":           cat.genero,
+                    "grados_permitidos": cat.grados_permitidos,
+                    "orden_ejecucion":  cat.orden_ejecucion or (i + 1),
+                    "estatus":          "pendiente",
+                    "total_inscritos":  0,
+                    "bracket_generado": False,
+                }
+                cat_res = db.table("torneo_categorias").insert(cat_row).execute()
+                if cat_res.data:
+                    categorias_creadas.append(cat_res.data[0])
+        # ─────────────────────────────────────────────────────────────
+
+        return {
+            "ok":         True,
+            "torneo":     torneo_creado,
+            "categorias": categorias_creadas,          # ← devuelve las categorías creadas
+            "total_categorias": len(categorias_creadas),
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        # Log del error detallado para depuración
         print(f"Error al insertar torneo: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
