@@ -510,21 +510,40 @@ async def escanear_qr(
         nombre_area_correcta = area_correcta_res.data[0]["nombre_area"] if area_correcta_res.data else f"Área {area_asignada}"
         nombre_area_actual   = area_actual_res.data[0]["nombre_area"]   if area_actual_res.data   else f"Área {idarea}"
 
-    # Buscar combate activo del competidor en esta área
+    # Buscar combate activo del competidor
     combate_activo = None
-    if en_area_correcta and idarea:
-        # Buscar combate pendiente donde este competidor participe
-        c_res = db.table("combates").select(
-            "idcombate, id_competidor_1, id_competidor_2, ronda, estatus"
-        ).eq("idarea", idarea).eq("estatus", "pendiente")\
-         .execute()
-
+    if idarea:
         idinscripcion = insc["idinscripcion"]
+        idtorneo_insc = insc["idtorneo"]
+
+        # Primero buscar combate asignado específicamente a esta área
+        c_res = db.table("combates").select(
+            "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
+        ).eq("idtorneo", idtorneo_insc).eq("estatus", "pendiente")\
+         .eq("idarea", idarea).execute()
+
         for c in c_res.data or []:
             if c.get("id_competidor_1") == idinscripcion or \
                c.get("id_competidor_2") == idinscripcion:
                 combate_activo = c
                 break
+
+        # Si no encontró con área, buscar cualquier combate pendiente del torneo
+        if not combate_activo:
+            c_res2 = db.table("combates").select(
+                "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
+            ).eq("idtorneo", idtorneo_insc).eq("estatus", "pendiente")\
+             .is_("idarea", "null").execute()
+
+            for c in c_res2.data or []:
+                if c.get("id_competidor_1") == idinscripcion or \
+                   c.get("id_competidor_2") == idinscripcion:
+                    combate_activo = c
+                    # Asignar el área a este combate automáticamente
+                    db.table("combates").update({"idarea": idarea})\
+                        .eq("idcombate", c["idcombate"]).execute()
+                    combate_activo["idarea"] = idarea
+                    break
 
     return {
         "ok":              True,
