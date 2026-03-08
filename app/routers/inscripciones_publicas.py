@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 from pydantic import BaseModel, EmailStr
 from supabase import Client
-import re, uuid, base64
+import re, uuid
 
 from utils.database import get_db
 
@@ -96,8 +96,7 @@ class InscripcionPayload(BaseModel):
     grado_escolar:      Optional[str]   = None
     escuela_procedencia: Optional[str]  = None
 
-    # Foto (base64 opcional — se puede subir después)
-    foto_base64:        Optional[str]   = None
+    # Foto: se sube por separado via POST /{slug}/foto/{idalumno}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -114,7 +113,7 @@ async def registrar_alumno(
     Registra un nuevo alumno directamente en la BD desde el formulario público.
     - Si es mayor de edad: usa sus propios datos de contacto
     - Si es menor: usa datos del tutor
-    - Foto: si viene en base64 se sube a Supabase Storage
+    - Foto: se sube por separado via POST /{slug}/foto/{idalumno}
     - Alumno queda activo (estatus=1) de inmediato
     """
     escuela = _get_escuela_by_slug(slug, db)
@@ -131,19 +130,7 @@ async def registrar_alumno(
     if dup.data:
         raise HTTPException(409, "Ya existe un alumno con ese nombre y fecha de nacimiento en esta escuela.")
 
-    # Subir foto si viene en base64
-    foto_url = None
-    if payload.foto_base64:
-        try:
-            header, data = payload.foto_base64.split(",", 1) if "," in payload.foto_base64 else ("", payload.foto_base64)
-            ext = "jpg"
-            if "png" in header: ext = "png"
-            img_bytes = base64.b64decode(data)
-            filename = f"alumnos/{idescuela}/{uuid.uuid4()}.{ext}"
-            db.storage.from_("fotos").upload(filename, img_bytes, {"content-type": f"image/{ext}"})
-            foto_url = db.storage.from_("fotos").get_public_url(filename)
-        except Exception:
-            foto_url = None  # foto falla silenciosamente, no bloquea el registro
+    foto_url = None  # foto se sube por separado
 
     # Preparar contacto según edad
     telefono = payload.telefono_propio if payload.es_mayor_de_edad else payload.telefonocontacto
@@ -186,6 +173,48 @@ async def registrar_alumno(
         "apellidos": f"{nuevo['apellidopaterno']} {nuevo.get('apellidomaterno','') or ''}".strip(),
     }
 
+
+
+
+# ─────────────────────────────────────────────────────────────
+#  POST /inscripcion/:slug/foto/:idalumno — subir foto pública
+# ─────────────────────────────────────────────────────────────
+
+@router.post("/{slug}/foto/{idalumno}", status_code=200)
+async def subir_foto_publica(
+    slug: str,
+    idalumno: int,
+    file: UploadFile = File(...),
+    db: Client = Depends(get_db),
+):
+    """
+    Sube la foto del alumno recién registrado al bucket de Supabase.
+    No requiere autenticación — es parte del flujo público de inscripción.
+    """
+    # Verificar que el alumno exista y pertenezca a esta escuela
+    escuela = _get_escuela_by_slug(slug, db)
+    alumno = db.table("alumnos").select("idalumno").eq("idalumno", idalumno).eq("idescuela", escuela["idescuela"]).execute()
+    if not alumno.data:
+        raise HTTPException(404, "Alumno no encontrado.")
+
+    extension = file.filename.split(".")[-1].lower() if file.filename else "jpg"
+    if extension not in ["jpg", "jpeg", "png"]:
+        raise HTTPException(400, "Solo se permiten imágenes JPG o PNG.")
+
+    file_path = f"{idalumno}_{uuid.uuid4()}.{extension}"
+    file_content = await file.read()
+
+    try:
+        db.storage.from_("alumnos").upload(
+            path=file_path,
+            file=file_content,
+            file_options={"content-type": file.content_type}
+        )
+        foto_url = db.storage.from_("alumnos").get_public_url(file_path)
+        db.table("alumnos").update({"fotoalumno": foto_url}).eq("idalumno", idalumno).execute()
+        return {"ok": True, "fotoalumno": foto_url}
+    except Exception as e:
+        raise HTTPException(500, f"Error al subir foto: {str(e)}")
 
 # ─────────────────────────────────────────────────────────────
 #  GET /inscripcion/:slug/link — genera la URL pública
