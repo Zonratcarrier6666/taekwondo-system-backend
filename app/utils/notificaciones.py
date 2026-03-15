@@ -1,5 +1,17 @@
 # ============================================================
 #  app/utils/notificaciones.py
+#  Notificaciones vía RESEND
+#
+#  IMPORTANTE — Sandbox de Resend:
+#  Solo entrega correos a direcciones verificadas en tu cuenta Resend.
+#  Para agregar correos de prueba:
+#    resend.com → Settings → Verified Emails → Add email address
+#
+#  Cuando tengas dominio propio verificado en Resend, cambia:
+#    from_email = "Dragon Negro Dojo <notificaciones@tudominio.com>"
+# ============================================================
+
+#  app/utils/notificaciones.py
 #  Notificaciones vía RESEND (ya no usa SMTP Gmail)
 # ============================================================
 
@@ -166,7 +178,7 @@ def notificar_pago_pendiente(
             nombre_alumno, nombre_escuela,
             concepto, monto, folio, fecha_vencimiento,
         ),
-        from_email = "TKW Sistema <tkdsystem1@gmail.com>",
+        from_email = "TKW Sistema <onboarding@resend.dev>",
     )
     result["email"] = r.get("success", False)
     result["error"] = r.get("error")
@@ -188,7 +200,7 @@ def notificar_formulario_inscripcion(
         to      = correo_tutor,
         subject = f"Formulario inscripción {ciclo} — {nombre_escuela}",
         html    = _html_formulario(nombre_alumno, nombre_escuela, ciclo, link_formulario),
-        from_email = "TKW Sistema <tkdsystem1@gmail.com>",
+        from_email = "TKW Sistema <onboarding@resend.dev>",
     )
     result["email"] = r.get("success", False)
     result["error"] = r.get("error")
@@ -210,7 +222,7 @@ def notificar_recordatorio(
         to      = correo_tutor,
         subject = f"Recordatorio de pago — {nombre_alumno} | {nombre_escuela}",
         html    = _html_recordatorio(nombre_alumno, nombre_escuela, monto, dias_vencido),
-        from_email = "TKW Sistema <tkdsystem1@gmail.com>",
+        from_email = "TKW Sistema <onboarding@resend.dev>",
     )
     result["email"] = r.get("success", False)
     result["error"] = r.get("error")
