@@ -69,7 +69,7 @@ def _get_alumnos_activos(idescuela: int, idprofesor: Optional[int], db: Client) 
         db.table("alumnos")
         .select(
             "idalumno, nombres, apellidopaterno, fotoalumno, "
-            "cintagrados(nivelkupdan, color)"
+            "cintasgrados(nivelkupdan, color)"
         )
         .eq("idescuela", idescuela)
         .eq("estatus", 1)
@@ -126,7 +126,7 @@ async def lista_hoy(
 
     result = []
     for a in alumnos:
-        cinta = a.get("cintagrados") or {}
+        cinta = a.get("cintasgrados") or {}
         reg   = asist_map.get(a["idalumno"])
         result.append(AlumnoDiaResponse(
             idalumno       = a["idalumno"],
@@ -258,7 +258,7 @@ async def lista_por_fecha(
 
     result = []
     for a in alumnos:
-        cinta = a.get("cintagrados") or {}
+        cinta = a.get("cintasgrados") or {}
         reg   = asist_map.get(a["idalumno"])
         result.append(AlumnoDiaResponse(
             idalumno        = a["idalumno"],
@@ -412,7 +412,7 @@ async def resumen_grupo(
         aid  = a["idalumno"]
         c    = conteo[aid]
         pct  = round(c["presentes"] / c["total"] * 100, 1) if c["total"] > 0 else None
-        cinta = a.get("cintagrados") or {}
+        cinta = a.get("cintasgrados") or {}
         resultado.append({
             "idalumno":        aid,
             "nombre_completo": f"{a['nombres']} {a['apellidopaterno']}",
