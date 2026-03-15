@@ -37,6 +37,37 @@ from app.utils.notificaciones import (
 router = APIRouter(prefix="/pagos", tags=["Pagos y Cobranza"])
 ROLES_STAFF = {"Escuela", "Profesor", "SuperAdmin"}
 
+# ─────────────────────────────────────────────────────────────
+#  HELPER — Leer precios vigentes de la escuela
+# ─────────────────────────────────────────────────────────────
+
+_PRECIOS_DEFAULT = {
+    "mensualidad_default": 400.0,
+    "inscripcion_default": 500.0,
+    "examen_default":      200.0,
+    "recargo_semanal":      50.0,
+    "dias_gracia":           5,
+}
+
+def _get_precios(idescuela: int, db: Client) -> dict:
+    """
+    Lee los precios configurados por la escuela desde config_json.
+    Si no tienen config, devuelve los defaults.
+    Siempre retorna todos los campos garantizados.
+    """
+    res = db.table("datosescuela").select("config_json")            .eq("idescuela", idescuela).execute()
+    if not res.data:
+        return _PRECIOS_DEFAULT.copy()
+    config  = res.data[0].get("config_json") or {}
+    precios = config.get("precios", {})
+    # Retrocompatibilidad: asegurar todos los campos
+    result  = _PRECIOS_DEFAULT.copy()
+    result.update({k: v for k, v in precios.items()
+                   if k in _PRECIOS_DEFAULT})
+    return result
+
+
+
 
 # ─────────────────────────────────────────────────────────────
 #  HELPERS
@@ -190,7 +221,10 @@ async def crear_mensualidad(
         raise HTTPException(409, f"Ya existe mensualidad {body.mes_correspondiente}")
 
     cfg       = _cfg_alumno(body.idalumno, alumno["idescuela"], db)
+    precios   = _get_precios(alumno["idescuela"], db)
     dia_cobro = cfg.get("dia_cobro", 1)
+    # Usar monto del body si se envía explícito, si no usar el precio configurado
+    monto_final = body.monto if body.monto else cfg.get("monto_mensualidad", precios["mensualidad_default"])
     try:
         y, m      = map(int, body.mes_correspondiente.split("-"))
         f_cobro   = str(date(y, m, min(dia_cobro, 28)))
@@ -201,7 +235,7 @@ async def crear_mensualidad(
         "idalumno":     body.idalumno,
         "idescuela":    alumno["idescuela"],
         "id_tipo_pago": int(TipoPago.MENSUALIDAD),
-        "monto":        body.monto,
+        "monto":        monto_final,
         "concepto":     f"Mensualidad {body.mes_correspondiente}",
         "folio_recibo": _folio(),
         "estatus":      int(EstatusPago.PENDIENTE),
@@ -211,6 +245,11 @@ async def crear_mensualidad(
             "tipo": "mensualidad",
             "mes":  body.mes_correspondiente,
             "dia_cobro": dia_cobro,
+            # Snapshot del precio vigente al momento de generar el cargo
+            "precio_vigente":        monto_final,
+            "recargo_semanal_vigente": precios["recargo_semanal"],
+            "dias_gracia_vigente":     precios["dias_gracia"],
+            "precio_tomado_en":        str(date.today()),
         },
     }
     r = db.table("pagos").insert(pago).execute()
@@ -235,7 +274,8 @@ async def mensualidades_masivo(
                 omitidos.append(aid); continue
 
             cfg       = _cfg_alumno(aid, body.idescuela, db)
-            monto     = cfg.get("monto_mensualidad", body.monto_default)
+            precios   = _get_precios(body.idescuela, db)
+            monto     = cfg.get("monto_mensualidad") or body.monto_default or precios["mensualidad_default"]
             dia_cobro = cfg.get("dia_cobro", body.dia_cobro_default)
             y, m      = map(int, body.mes_correspondiente.split("-"))
             f_cobro   = str(date(y, m, min(dia_cobro, 28)))
@@ -253,6 +293,11 @@ async def mensualidades_masivo(
                     "tipo": "mensualidad",
                     "mes":  body.mes_correspondiente,
                     "dia_cobro": dia_cobro,
+                    # Snapshot del precio vigente
+                    "precio_vigente":          monto,
+                    "recargo_semanal_vigente":  precios["recargo_semanal"],
+                    "dias_gracia_vigente":      precios["dias_gracia"],
+                    "precio_tomado_en":         str(date.today()),
                 },
             }).execute()
             generados.append(aid)
@@ -289,11 +334,13 @@ async def crear_inscripcion(
     if _ya_inscripcion(body.idalumno, body.ciclo.value, body.year, db):
         raise HTTPException(409, f"Ya existe inscripción {body.ciclo.value} {body.year}")
 
+    precios_insc = _get_precios(alumno["idescuela"], db)
+    monto_insc   = body.monto if body.monto else precios_insc["inscripcion_default"]
     pago = {
         "idalumno":     body.idalumno,
         "idescuela":    alumno["idescuela"],
         "id_tipo_pago": int(TipoPago.INSCRIPCION),
-        "monto":        body.monto,
+        "monto":        monto_insc,
         "concepto":     f"Inscripción {body.ciclo.value} {body.year}",
         "folio_recibo": _folio(),
         "estatus":      int(EstatusPago.PENDIENTE),
@@ -304,6 +351,9 @@ async def crear_inscripcion(
             "year":              body.year,
             "formulario_status": "PENDIENTE",
             "firma_url":         None,
+            # Snapshot precio vigente
+            "precio_vigente":   monto_insc,
+            "precio_tomado_en": str(date.today()),
         },
     }
     r = db.table("pagos").insert(pago).execute()

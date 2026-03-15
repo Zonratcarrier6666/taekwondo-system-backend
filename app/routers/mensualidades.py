@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List
 from supabase import Client
-from datetime import datetime
+from datetime import datetime, date
 
 from utils.database import get_db
 from utils.auth_utils import get_current_user
@@ -10,6 +10,23 @@ from schemas.usuarios import UserRole
 from schemas.pagos import TipoPago, EstatusPago
 
 router = APIRouter(prefix="/mensualidades", tags=["Finanzas y Pagos"])
+
+_PRECIOS_DEFAULT = {
+    "mensualidad_default": 400.0,
+    "recargo_semanal":      50.0,
+    "dias_gracia":           5,
+}
+
+def _get_precios_escuela(idescuela: int, db: Client) -> dict:
+    res = db.table("datosescuela").select("config_json").eq("idescuela", idescuela).execute()
+    if not res.data:
+        return _PRECIOS_DEFAULT.copy()
+    config  = res.data[0].get("config_json") or {}
+    precios = config.get("precios", {})
+    result  = _PRECIOS_DEFAULT.copy()
+    result.update({k: v for k, v in precios.items() if k in _PRECIOS_DEFAULT})
+    return result
+
 
 @router.post("/generar-mes", response_model=ResultadoGeneracion)
 async def generar_mensualidades_escuela(
@@ -69,17 +86,29 @@ async def generar_mensualidades_escuela(
 
         # C. Inserción del Cargo Pendiente
         try:
+            precios = _get_precios_escuela(id_escuela, db)
+            # Usar monto enviado por el admin si viene, si no usar el de la escuela
+            monto_cargo = datos.monto_estandar if datos.monto_estandar else precios["mensualidad_default"]
             db.table("pagos").insert({
-                "idalumno": alumno["idalumno"],
-                "idescuela": id_escuela,
+                "idalumno":     alumno["idalumno"],
+                "idescuela":    id_escuela,
                 "id_tipo_pago": TipoPago.MENSUALIDAD.value,
-                "monto": datos.monto_estandar,
-                "concepto": concepto,
-                "estatus": EstatusPago.PENDIENTE.value
+                "monto":        monto_cargo,
+                "concepto":     concepto,
+                "estatus":      EstatusPago.PENDIENTE.value,
+                "desglose_interno": {
+                    "tipo":                    "mensualidad",
+                    "mes":                     datos.mes,
+                    "anio":                    datos.anio,
+                    "precio_vigente":          monto_cargo,
+                    "recargo_semanal_vigente":  precios["recargo_semanal"],
+                    "dias_gracia_vigente":      precios["dias_gracia"],
+                    "precio_tomado_en":         str(date.today()),
+                },
             }).execute()
             
             cargos_creados += 1
-            monto_acumulado += datos.monto_estandar
+            monto_acumulado += monto_cargo
         except Exception:
             alumnos_omitidos += 1
 
