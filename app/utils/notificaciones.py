@@ -30,9 +30,24 @@ APP_URL = os.environ.get("APP_URL", "http://localhost:5173")
 
 def _html_pago_pendiente(
     nombre_alumno: str, nombre_escuela: str,
-    concepto: str, monto: float,
+    concepto: str, monto_base: float,
     folio: str, fecha_vencimiento: str,
+    recargo: float = 0.0,
 ) -> str:
+    monto_total = monto_base + recargo
+    # Bloque de recargo — solo se muestra si hay recargo
+    bloque_recargo = ""
+    if recargo > 0:
+        bloque_recargo = f"""
+    <div class="row recargo">
+      <span>⚠️ Recargo por atraso</span>
+      <span>+${recargo:,.0f}</span>
+    </div>
+    <div class="row total">
+      <span>Total a pagar</span>
+      <span>${monto_total:,.0f}</span>
+    </div>"""
+
     return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
 <style>
   body{{font-family:Arial,sans-serif;background:#f1f5f9;margin:0;padding:0}}
@@ -47,6 +62,8 @@ def _html_pago_pendiente(
   .row{{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1f5f9}}
   .row span:first-child{{color:#64748b;font-size:13px}}
   .row span:last-child{{color:#0f172a;font-size:13px;font-weight:700}}
+  .row.recargo span{{color:#dc2626 !important;font-size:13px;font-weight:700}}
+  .row.total span{{color:#7c3aed !important;font-size:14px;font-weight:900}}
   .monto{{font-size:32px;font-weight:900;color:#7c3aed;text-align:center;padding:18px 0}}
   .foot{{background:#f8fafc;padding:14px;text-align:center;color:#94a3b8;
          font-size:11px;border-top:1px solid #e2e8f0}}
@@ -58,7 +75,9 @@ def _html_pago_pendiente(
     <div class="row"><span>Concepto</span><span>{concepto}</span></div>
     <div class="row"><span>Folio</span><span>{folio}</span></div>
     <div class="row"><span>Vencimiento</span><span>{fecha_vencimiento}</span></div>
-    <div class="monto">${monto:,.0f} MXN</div>
+    <div class="row"><span>Mensualidad</span><span>${monto_base:,.0f}</span></div>
+    {bloque_recargo}
+    <div class="monto">${monto_total:,.0f} MXN</div>
   </div>
   <div class="foot">Generado automáticamente · TKW System</div>
 </div></body></html>"""
@@ -166,6 +185,7 @@ def notificar_pago_pendiente(
     folio:             str,
     fecha_vencimiento: str,
     canal:             str = "email",          # canal ignorado, siempre email
+    recargo:           float = 0.0,            # recargo por atraso calculado en backend
 ) -> dict:
     result = {"email": None, "error": None}
     if not correo_tutor:
@@ -177,6 +197,7 @@ def notificar_pago_pendiente(
         html    = _html_pago_pendiente(
             nombre_alumno, nombre_escuela,
             concepto, monto, folio, fecha_vencimiento,
+            recargo=recargo,
         ),
         from_email = "TKW Sistema <onboarding@resend.dev>",
     )

@@ -147,8 +147,27 @@ def _calcular_edad(fecha_nac: str) -> int:
         return hoy.year - fn.year - ((hoy.month, hoy.day) < (fn.month, fn.day))
     except Exception:
         return 0
-    
-    
+
+
+
+def _calcular_recargo(pago: dict, recargo_semanal: float) -> float:
+    """
+    Calcula el recargo acumulado de un pago pendiente según las semanas de atraso.
+    Replica la misma lógica que calcAtraso() en el frontend.
+    """
+    try:
+        fecha_venc_raw = pago.get("fecha_pago")
+        if not fecha_venc_raw:
+            return 0.0
+        fv  = date.fromisoformat(str(fecha_venc_raw)[:10])
+        hoy = date.today()
+        dias_corridos = max(0, (hoy - fv).days)
+        semanas_atraso = dias_corridos // 7
+        return round(semanas_atraso * recargo_semanal, 2)
+    except Exception:
+        return 0.0
+
+
 # ─────────────────────────────────────────────────────────────
 #  1. CONFIG POR ALUMNO
 # ─────────────────────────────────────────────────────────────
@@ -688,13 +707,17 @@ async def notificar(
         if not p:
             raise HTTPException(404, "No se encontró el pago indicado para este alumno")
 
-        pago = p[0]
+        pago       = p[0]
+        precios    = _get_precios(alumno["idescuela"], db)
+        monto_base = _f(pago.get("monto"))
+        recargo    = _calcular_recargo(pago, precios["recargo_semanal"])
         result = notificar_pago_pendiente(
             correo, nombre, escuela["nombreescuela"],
             pago.get("concepto", "Pago pendiente"),
-            _f(pago.get("monto")),
+            monto_base,
             pago.get("folio_recibo", "—"),
             str(pago.get("fecha_pago", ""))[:10],
+            recargo=recargo,
         )
 
     return NotificacionResult(
@@ -729,13 +752,17 @@ async def notificar_lote(
             if not p:
                 resultados.append({"idalumno": aid, "error": "Sin pagos pendientes"}); continue
 
-            pago   = p[0]
+            pago       = p[0]
+            precios    = _get_precios(alumno["idescuela"], db)
+            monto_base = _f(pago.get("monto"))
+            recargo    = _calcular_recargo(pago, precios["recargo_semanal"])
             result = notificar_pago_pendiente(
                 correo, nombre, escuela["nombreescuela"],
-                pago.get("concepto", ""), _f(pago.get("monto")),
+                pago.get("concepto", ""), monto_base,
                 pago.get("folio_recibo", ""),
                 str(pago.get("fecha_pago", ""))[:10],
                 body.canal,
+                recargo=recargo,
             )
             resultados.append({
                 "idalumno":          aid,
