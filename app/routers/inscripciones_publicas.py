@@ -165,12 +165,73 @@ async def registrar_alumno(
     if not result.data:
         raise HTTPException(500, "Error al registrar el alumno.")
 
-    nuevo = result.data[0]
+    nuevo         = result.data[0]
+    nuevo_id      = nuevo["idalumno"]
+    from datetime import date
+    fecha_hoy     = date.today()
+    dia_cobro     = fecha_hoy.day
+    mes_str       = fecha_hoy.strftime("%Y-%m")
+
+    # ── 1. Guardar dia_cobro y monto en config_json de la escuela ──
+    try:
+        esc_res = db.table("datosescuela").select("config_json")\
+            .eq("idescuela", idescuela).execute()
+        config  = (esc_res.data[0].get("config_json") or {}) if esc_res.data else {}
+        precios = config.get("precios", {})
+        monto   = float(precios.get("mensualidad_default", 400.0))
+        recargo = float(precios.get("recargo_semanal", 50.0))
+        gracia  = int(precios.get("dias_gracia", 5))
+
+        config[f"pago_alumno_{nuevo_id}"] = {
+            "monto_mensualidad": monto,
+            "dia_cobro":         dia_cobro,
+            "actualizado_en":    str(fecha_hoy),
+        }
+        db.table("datosescuela").update({"config_json": config})\
+            .eq("idescuela", idescuela).execute()
+    except Exception as e:
+        print(f"[INSCRIPCION] Error guardando config alumno {nuevo_id}: {e}")
+        monto   = 400.0
+        recargo = 50.0
+        gracia  = 5
+
+    # ── 2. Generar primer cargo de mensualidad del mes actual ──────
+    primer_cargo_ok = False
+    try:
+        fecha_venc = str(date(fecha_hoy.year, fecha_hoy.month, min(dia_cobro, 28)))
+        db.table("pagos").insert({
+            "idalumno":     nuevo_id,
+            "idescuela":    idescuela,
+            "id_tipo_pago": 1,
+            "monto":        monto,
+            "concepto":     f"Mensualidad {mes_str}",
+            "folio_recibo": f"TKW-{uuid.uuid4().hex[:8].upper()}",
+            "estatus":      0,
+            "fecha_pago":   fecha_venc,
+            "desglose_interno": {
+                "tipo":                    "mensualidad",
+                "mes":                     mes_str,
+                "dia_cobro":               dia_cobro,
+                "precio_vigente":          monto,
+                "recargo_semanal_vigente": recargo,
+                "dias_gracia_vigente":     gracia,
+                "precio_tomado_en":        str(fecha_hoy),
+                "generado_por":            "inscripcion_publica",
+            },
+        }).execute()
+        primer_cargo_ok = True
+    except Exception as e:
+        # No bloquear el registro si falla el cargo
+        print(f"[INSCRIPCION] Error generando cargo mensualidad alumno {nuevo_id}: {e}")
+
     return {
-        "message":   "Alumno registrado exitosamente",
-        "idalumno":  nuevo["idalumno"],
-        "nombres":   nuevo["nombres"],
-        "apellidos": f"{nuevo['apellidopaterno']} {nuevo.get('apellidomaterno','') or ''}".strip(),
+        "message":              "Alumno registrado exitosamente",
+        "idalumno":             nuevo_id,
+        "nombres":              nuevo["nombres"],
+        "apellidos":            f"{nuevo['apellidopaterno']} {nuevo.get('apellidomaterno','') or ''}".strip(),
+        "dia_cobro":            dia_cobro,
+        "primer_cargo_mes":     mes_str,
+        "primer_cargo_generado": primer_cargo_ok,
     }
 
 

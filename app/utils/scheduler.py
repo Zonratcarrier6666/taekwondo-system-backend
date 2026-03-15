@@ -312,12 +312,121 @@ async def revisar_pagos_y_notificar():
 
 
 # ─────────────────────────────────────────────────────────────
+#  JOB 2 — Generar mensualidades diarias por dia_cobro
+#  Corre a las 8:00 AM, ANTES que el job de notificaciones.
+#  Busca alumnos cuyo dia_cobro == hoy.day y genera su cargo
+#  mensual si todavía no existe para este mes.
+# ─────────────────────────────────────────────────────────────
+
+async def generar_mensualidades_diario():
+    """
+    Por cada escuela revisa sus alumnos activos.
+    Si hoy coincide con el dia_cobro del alumno (guardado en config_json),
+    crea el cargo de mensualidad del mes en curso si no existe aún.
+    """
+    import uuid as _uuid
+    db  = get_db()
+    hoy = date.today()
+    dia_hoy = hoy.day
+    mes_str = hoy.strftime("%Y-%m")
+
+    print(f"[SCHEDULER] Generando mensualidades — día {dia_hoy}, mes {mes_str}")
+
+    try:
+        escuelas = db.table("datosescuela").select("idescuela, config_json").execute().data or []
+    except Exception as e:
+        print(f"[SCHEDULER ERROR] No se pudo consultar escuelas: {e}")
+        return
+
+    generados = 0
+    omitidos  = 0
+
+    for escuela in escuelas:
+        idescuela = escuela["idescuela"]
+        config    = escuela.get("config_json") or {}
+        precios   = config.get("precios", {})
+        monto_def = float(precios.get("mensualidad_default", 400.0))
+        recargo   = float(precios.get("recargo_semanal", 50.0))
+        gracia    = int(precios.get("dias_gracia", 5))
+
+        try:
+            alumnos = db.table("alumnos").select("idalumno")\
+                .eq("idescuela", idescuela).eq("estatus", 1).execute().data or []
+        except Exception as e:
+            print(f"[SCHEDULER ERROR] Escuela {idescuela}: {e}")
+            continue
+
+        for al in alumnos:
+            aid     = al["idalumno"]
+            cfg_al  = config.get(f"pago_alumno_{aid}", {})
+            dia_cobro = cfg_al.get("dia_cobro")
+
+            # Solo procesar si hoy es el día de cobro del alumno
+            if dia_cobro != dia_hoy:
+                omitidos += 1
+                continue
+
+            # Evitar duplicado para este mes
+            try:
+                existe = db.table("pagos").select("idpago")\
+                    .eq("idalumno", aid)\
+                    .eq("id_tipo_pago", 1)\
+                    .like("concepto", f"%{mes_str}%").execute().data
+                if existe:
+                    omitidos += 1
+                    continue
+            except Exception:
+                omitidos += 1
+                continue
+
+            monto      = float(cfg_al.get("monto_mensualidad") or monto_def)
+            fecha_venc = str(date(hoy.year, hoy.month, min(dia_cobro, 28)))
+
+            try:
+                db.table("pagos").insert({
+                    "idalumno":     aid,
+                    "idescuela":    idescuela,
+                    "id_tipo_pago": 1,
+                    "monto":        monto,
+                    "concepto":     f"Mensualidad {mes_str}",
+                    "folio_recibo": f"TKW-{_uuid.uuid4().hex[:8].upper()}",
+                    "estatus":      0,
+                    "fecha_pago":   fecha_venc,
+                    "desglose_interno": {
+                        "tipo":                    "mensualidad",
+                        "mes":                     mes_str,
+                        "dia_cobro":               dia_cobro,
+                        "precio_vigente":          monto,
+                        "recargo_semanal_vigente": recargo,
+                        "dias_gracia_vigente":     gracia,
+                        "precio_tomado_en":        str(hoy),
+                        "generado_por":            "scheduler",
+                    },
+                }).execute()
+                generados += 1
+            except Exception as e:
+                print(f"[SCHEDULER ERROR] Cargo alumno {aid}: {e}")
+                omitidos += 1
+
+    print(f"[SCHEDULER] ✓ Mensualidades — {generados} generadas, {omitidos} omitidas")
+
+
+# ─────────────────────────────────────────────────────────────
 #  INICIAR / DETENER  (llamado desde main.py)
 # ─────────────────────────────────────────────────────────────
 
 def start_scheduler():
     """Inicia el scheduler. Llamar en el startup de FastAPI."""
     if not scheduler.running:
+        # Job 1 — Generar mensualidades (8:00 AM, antes de notificaciones)
+        scheduler.add_job(
+            generar_mensualidades_diario,
+            trigger=CronTrigger(hour=8, minute=0),
+            id="generar_mensualidades",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        # Job 2 — Revisar pagos y notificar (9:00 AM)
         scheduler.add_job(
             revisar_pagos_y_notificar,
             trigger=CronTrigger(hour=9, minute=0),   # 9:00 AM hora México
@@ -326,7 +435,7 @@ def start_scheduler():
             misfire_grace_time=3600,  # Si uvicorn estaba caído, ejecuta hasta 1h después
         )
         scheduler.start()
-        print("[SCHEDULER] ✓ Iniciado — corre diario a las 9:00 AM (México)")
+        print("[SCHEDULER] ✓ Iniciado — mensualidades 8:00 AM · notificaciones 9:00 AM (México)")
 
 
 def stop_scheduler():
