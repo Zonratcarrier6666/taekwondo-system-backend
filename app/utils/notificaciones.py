@@ -166,7 +166,7 @@ def notificar_pago_pendiente(
             nombre_alumno, nombre_escuela,
             concepto, monto, folio, fecha_vencimiento,
         ),
-        from_email = "TKW Sistema <onboarding@resend.dev>",
+        from_email = "TKW Sistema <tkdsystem1@gmail.com>",
     )
     result["email"] = r.get("success", False)
     result["error"] = r.get("error")
@@ -188,7 +188,7 @@ def notificar_formulario_inscripcion(
         to      = correo_tutor,
         subject = f"Formulario inscripción {ciclo} — {nombre_escuela}",
         html    = _html_formulario(nombre_alumno, nombre_escuela, ciclo, link_formulario),
-        from_email = "TKW Sistema <onboarding@resend.dev>",
+        from_email = "TKW Sistema <tkdsystem1@gmail.com>",
     )
     result["email"] = r.get("success", False)
     result["error"] = r.get("error")
@@ -210,7 +210,7 @@ def notificar_recordatorio(
         to      = correo_tutor,
         subject = f"Recordatorio de pago — {nombre_alumno} | {nombre_escuela}",
         html    = _html_recordatorio(nombre_alumno, nombre_escuela, monto, dias_vencido),
-        from_email = "TKW Sistema <onboarding@resend.dev>",
+        from_email = "TKW Sistema <tkdsystem1@gmail.com>",
     )
     result["email"] = r.get("success", False)
     result["error"] = r.get("error")
