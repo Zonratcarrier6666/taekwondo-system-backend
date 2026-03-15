@@ -46,6 +46,11 @@ class AlumnoDiaResponse(BaseModel):
     presente: Optional[bool] = None   # None = no registrado aún hoy
     id_asistencia: Optional[int] = None
 
+class ListaDiaResponse(BaseModel):
+    fecha: str
+    ya_registrada: bool          # True si ya se pasó lista completa este día
+    alumnos: List[AlumnoDiaResponse]
+
 
 # ─────────────────────────────────────────────────────────────
 #  HELPERS
@@ -85,7 +90,7 @@ def _get_alumnos_activos(idescuela: int, idprofesor: Optional[int], db: Client) 
 #  Alumnos del grupo con su estatus de asistencia de hoy
 # ─────────────────────────────────────────────────────────────
 
-@router.get("/hoy", response_model=List[AlumnoDiaResponse])
+@router.get("/hoy", response_model=ListaDiaResponse)
 async def lista_hoy(
     current_user: dict = Depends(get_current_user),
     db: Client = Depends(get_db),
@@ -110,7 +115,7 @@ async def lista_hoy(
     alumnos = _get_alumnos_activos(idescuela, idprofesor if rol == UserRole.PROFESOR else None, db)
 
     if not alumnos:
-        return []
+        return ListaDiaResponse(fecha=hoy, ya_registrada=False, alumnos=[])
 
     ids = [a["idalumno"] for a in alumnos]
 
@@ -123,6 +128,9 @@ async def lista_hoy(
         .execute()
     )
     asist_map = {r["idalumno"]: r for r in (asist_res.data or [])}
+
+    # ya_registrada = todos los alumnos tienen registro hoy
+    ya_registrada = len(asist_map) >= len(ids)
 
     result = []
     for a in alumnos:
@@ -139,7 +147,7 @@ async def lista_hoy(
             id_asistencia  = reg["id"] if reg else None,
         ))
 
-    return result
+    return ListaDiaResponse(fecha=hoy, ya_registrada=ya_registrada, alumnos=result)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -180,6 +188,17 @@ async def pasar_lista(
     if not body.registros:
         raise HTTPException(400, "La lista de registros está vacía.")
 
+    # Verificar si ya se pasó lista este día
+    existing = (
+        db.table("asistencia")
+        .select("id", count="exact")
+        .eq("idescuela", idescuela)
+        .eq("fecha", fecha)
+        .execute()
+    )
+    if (existing.count or 0) >= len(body.registros):
+        raise HTTPException(400, "La lista de este día ya fue registrada y no puede modificarse.")
+
     # Construir upsert
     rows = [
         {
@@ -217,7 +236,7 @@ async def pasar_lista(
 #  Lista de un día específico
 # ─────────────────────────────────────────────────────────────
 
-@router.get("/fecha/{fecha}", response_model=List[AlumnoDiaResponse])
+@router.get("/fecha/{fecha}", response_model=ListaDiaResponse)
 async def lista_por_fecha(
     fecha: str,
     current_user: dict = Depends(get_current_user),
@@ -244,7 +263,7 @@ async def lista_por_fecha(
 
     alumnos = _get_alumnos_activos(idescuela, idprofesor if rol == UserRole.PROFESOR else None, db)
     if not alumnos:
-        return []
+        return ListaDiaResponse(fecha=fecha, ya_registrada=False, alumnos=[])
 
     ids = [a["idalumno"] for a in alumnos]
     asist_res = (
@@ -255,6 +274,8 @@ async def lista_por_fecha(
         .execute()
     )
     asist_map = {r["idalumno"]: r for r in (asist_res.data or [])}
+
+    ya_registrada = len(asist_map) >= len(ids)
 
     result = []
     for a in alumnos:
@@ -271,7 +292,7 @@ async def lista_por_fecha(
             id_asistencia   = reg["id"] if reg else None,
         ))
 
-    return result
+    return ListaDiaResponse(fecha=fecha, ya_registrada=ya_registrada, alumnos=result)
 
 
 # ─────────────────────────────────────────────────────────────
