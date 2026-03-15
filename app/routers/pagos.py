@@ -944,3 +944,160 @@ async def historial_pagos(
         "paginas":          max(1, -(-total // por_pagina)),  # ceil division
         "pagos":            pagina_data,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+#  PROFESOR — Pagos pendientes de sus alumnos
+#  GET /finanzas/pagos/profesor/pendientes
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/profesor/pendientes")
+async def pendientes_profesor(
+    tipo: Optional[int] = Query(None, description="1=Mensualidad 2=Inscripción 4=Torneo"),
+    user: dict = Depends(get_current_user),
+    db: Client = Depends(get_db),
+):
+    """
+    Devuelve los pagos pendientes SOLO de los alumnos asignados al profesor autenticado.
+    Mismo formato que /escuela/{id}/pendientes para reutilizar el mismo frontend.
+    """
+    if user.get("rol") not in ROLES_STAFF:
+        raise HTTPException(403, "Sin acceso")
+    if user.get("rol") == "Escuela":
+        raise HTTPException(403, "Este endpoint es exclusivo para profesores.")
+
+    id_usuario = user.get("idusuario")
+
+    # 1. Obtener idprofesor e idescuela del usuario autenticado
+    profe_res = db.table("profesores").select("idprofesor, idescuela")\
+        .eq("idusuario", id_usuario).execute()
+    if not profe_res.data:
+        raise HTTPException(404, "Perfil de profesor no encontrado.")
+
+    idprofesor = profe_res.data[0]["idprofesor"]
+    idescuela  = profe_res.data[0]["idescuela"]
+
+    # 2. IDs de alumnos asignados a este profesor
+    alumnos_res = db.table("alumnos").select("idalumno")\
+        .eq("idprofesor", idprofesor).eq("estatus", 1).execute()
+    mis_ids = [a["idalumno"] for a in (alumnos_res.data or [])]
+
+    if not mis_ids:
+        return {"ok": True, "total": 0, "pagos": [], "idprofesor": idprofesor, "idescuela": idescuela}
+
+    # 3. Pagos pendientes de esos alumnos
+    q = db.table("pagos").select(
+        "idpago, idalumno, idescuela, concepto, monto, folio_recibo, "
+        "fecha_pago, id_tipo_pago, estatus, metodo_pago, desglose_interno, "
+        "alumnos(nombres, apellidopaterno, correotutor, telefonocontacto)"
+    ).eq("idescuela", idescuela)\
+     .eq("estatus", int(EstatusPago.PENDIENTE))\
+     .in_("idalumno", mis_ids)
+
+    if tipo:
+        q = q.eq("id_tipo_pago", tipo)
+
+    r = q.order("fecha_pago").execute()
+    pagos = r.data or []
+
+    return {
+        "ok":        True,
+        "total":     len(pagos),
+        "pagos":     pagos,
+        "idprofesor": idprofesor,
+        "idescuela":  idescuela,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+#  PROFESOR — Historial de pagos de sus alumnos
+#  GET /finanzas/pagos/profesor/historial
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/profesor/historial")
+async def historial_profesor(
+    estatus:      Optional[int] = Query(None, description="0=Pendiente 1=Pagado"),
+    id_tipo_pago: Optional[int] = Query(None),
+    metodo_pago:  Optional[str] = Query(None),
+    buscar:       Optional[str] = Query(None),
+    fecha_desde:  Optional[str] = Query(None, description="YYYY-MM-DD"),
+    fecha_hasta:  Optional[str] = Query(None, description="YYYY-MM-DD"),
+    pagina:       int           = Query(1, ge=1),
+    por_pagina:   int           = Query(20, ge=1, le=100),
+    user: dict = Depends(get_current_user),
+    db: Client = Depends(get_db),
+):
+    """
+    Historial completo de pagos de los alumnos del profesor.
+    Soporta los mismos filtros y paginación que /escuela/{id}/historial.
+    """
+    if user.get("rol") not in ROLES_STAFF:
+        raise HTTPException(403, "Sin acceso")
+
+    id_usuario = user.get("idusuario")
+
+    profe_res = db.table("profesores").select("idprofesor, idescuela")\
+        .eq("idusuario", id_usuario).execute()
+    if not profe_res.data:
+        raise HTTPException(404, "Perfil de profesor no encontrado.")
+
+    idprofesor = profe_res.data[0]["idprofesor"]
+    idescuela  = profe_res.data[0]["idescuela"]
+
+    alumnos_res = db.table("alumnos").select("idalumno")\
+        .eq("idprofesor", idprofesor).execute()
+    mis_ids = [a["idalumno"] for a in (alumnos_res.data or [])]
+
+    if not mis_ids:
+        return {
+            "ok": True, "total": 0, "total_monto": 0.0,
+            "total_pagados": 0, "total_pendientes": 0,
+            "pagina": pagina, "por_pagina": por_pagina, "paginas": 1, "pagos": [],
+        }
+
+    q = db.table("pagos").select(
+        "idpago, idalumno, idescuela, concepto, monto, estatus, "
+        "id_tipo_pago, metodo_pago, folio_recibo, "
+        "fecha_pago, fecharegistro, notas_adicionales, url_comprobante, "
+        "alumnos(nombres, apellidopaterno)"
+    ).eq("idescuela", idescuela).in_("idalumno", mis_ids)
+
+    if estatus is not None:
+        q = q.eq("estatus", estatus)
+    if id_tipo_pago is not None:
+        q = q.eq("id_tipo_pago", id_tipo_pago)
+    if metodo_pago:
+        q = q.eq("metodo_pago", metodo_pago)
+    if fecha_desde:
+        q = q.gte("fecharegistro", fecha_desde)
+    if fecha_hasta:
+        q = q.lte("fecharegistro", f"{fecha_hasta}T23:59:59")
+
+    q = q.order("fecharegistro", desc=True)
+    todos = q.execute().data or []
+
+    if buscar:
+        bl = buscar.lower()
+        todos = [
+            p for p in todos
+            if bl in (p.get("concepto") or "").lower()
+            or bl in f"{(p.get('alumnos') or {}).get('nombres', '')} {(p.get('alumnos') or {}).get('apellidopaterno', '')}".lower()
+        ]
+
+    total            = len(todos)
+    total_monto      = sum(float(p.get("monto") or 0) for p in todos)
+    total_pagados    = sum(1 for p in todos if p.get("estatus") == int(EstatusPago.PAGADO))
+    total_pendientes = sum(1 for p in todos if p.get("estatus") == int(EstatusPago.PENDIENTE))
+    offset           = (pagina - 1) * por_pagina
+
+    return {
+        "ok":               True,
+        "total":            total,
+        "total_monto":      round(total_monto, 2),
+        "total_pagados":    total_pagados,
+        "total_pendientes": total_pendientes,
+        "pagina":           pagina,
+        "por_pagina":       por_pagina,
+        "paginas":          max(1, -(-total // por_pagina)),
+        "pagos":            todos[offset: offset + por_pagina],
+    }
