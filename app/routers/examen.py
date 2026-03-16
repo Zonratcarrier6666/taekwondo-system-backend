@@ -206,18 +206,7 @@ async def detalle_examen(
     _, idescuela, _ = _resolver_rol(current_user, db)
     examen = _validar_examen(idexamen, idescuela, db)
 
-    # Alumnos inscritos con calificación
-    hist_res = db.table("historial_grados")\
-        .select(
-            "idhistorial, idalumno, idgrado_anterior, idgrado_nuevo, "
-            "calificacion, aprobado, notas, fecharegistro, "
-            "alumnos(nombres, apellidopaterno, fotoalumno), "
-            "grado_ant:cintasgrados!idgrado_anterior(nivelkupdan, color, color_stripe), "
-            "grado_nvo:cintasgrados!idgrado_nuevo(nivelkupdan, color, color_stripe)"
-        )\
-        .eq("idexamen", idexamen).execute()
-
-    # Pagos de este examen
+    # Pagos de este examen (fuente de verdad de inscritos)
     pagos_map = {}
     try:
         pagos_res = db.table("pagos")\
@@ -227,13 +216,62 @@ async def detalle_examen(
     except Exception:
         pass  # columna idexamen_ref aún no existe
 
+    # Historial de calificaciones de este examen
+    hist_res = db.table("historial_grados")\
+        .select(
+            "idhistorial, idalumno, idgrado_anterior, idgrado_nuevo, "
+            "calificacion, aprobado, notas, fecharegistro, "
+            "alumnos(nombres, apellidopaterno, fotoalumno), "
+            "grado_ant:cintasgrados!idgrado_anterior(nivelkupdan, color, color_stripe), "
+            "grado_nvo:cintasgrados!idgrado_nuevo(nivelkupdan, color, color_stripe)"
+        )\
+        .eq("idexamen", idexamen).execute()
+    hist_map = {h["idalumno"]: h for h in (hist_res.data or [])}
+
+    # Alumnos inscritos sin historial aún — obtener datos básicos
+    ids_sin_hist = [aid for aid in pagos_map if aid not in hist_map]
+    alumnos_extra = {}
+    if ids_sin_hist:
+        alu_res = db.table("alumnos")\
+            .select("idalumno, nombres, apellidopaterno, fotoalumno, idgradoactual, "
+                    "cintasgrados(nivelkupdan, color, color_stripe)")\
+            .in_("idalumno", ids_sin_hist).execute()
+        alumnos_extra = {a["idalumno"]: a for a in (alu_res.data or [])}
+
     alumnos_detalle = []
+
+    # 1. Los que ya tienen historial (calificados)
     for h in (hist_res.data or []):
         pago = pagos_map.get(h["idalumno"])
         alumnos_detalle.append({
             **h,
-            "pago": pago,
-            "pago_estatus": pago["estatus"] if pago else None,   # 0=pendiente 1=pagado
+            "pago":        pago,
+            "pago_estatus": pago["estatus"] if pago else None,
+        })
+
+    # 2. Los inscritos (pago) pero aún sin calificación
+    for aid in ids_sin_hist:
+        pago  = pagos_map[aid]
+        alu   = alumnos_extra.get(aid, {})
+        cinta = alu.get("cintasgrados") or {}
+        alumnos_detalle.append({
+            "idhistorial":    None,
+            "idalumno":       aid,
+            "idgrado_anterior": alu.get("idgradoactual"),
+            "idgrado_nuevo":  None,
+            "calificacion":   None,
+            "aprobado":       None,
+            "notas":          None,
+            "fecharegistro":  None,
+            "alumnos": {
+                "nombres":         alu.get("nombres", ""),
+                "apellidopaterno": alu.get("apellidopaterno", ""),
+                "fotoalumno":      alu.get("fotoalumno"),
+            },
+            "grado_ant": cinta if cinta else None,
+            "grado_nvo": None,
+            "pago":        pago,
+            "pago_estatus": pago["estatus"],
         })
 
     examen["alumnos"] = alumnos_detalle
@@ -378,9 +416,14 @@ async def inscribir_alumnos(
         raise HTTPException(400, "Ningún alumno válido para esta escuela.")
 
     # Ver quiénes ya están inscritos
-    ya_inscritos_res = db.table("historial_grados")\
-        .select("idalumno").eq("idexamen", idexamen).execute()
-    ya_inscritos = {h["idalumno"] for h in (ya_inscritos_res.data or [])}
+    # Ver quiénes ya están inscritos (tienen pago generado para este examen)
+    ya_inscritos = set()
+    try:
+        ya_ins_res = db.table("pagos")\
+            .select("idalumno").eq("idexamen_ref", idexamen).execute()
+        ya_inscritos = {p["idalumno"] for p in (ya_ins_res.data or [])}
+    except Exception:
+        pass  # si idexamen_ref no existe aún, nadie está inscrito
 
     costo = float(examen.get("costo_examen") or 0)
     nuevos = []
@@ -391,16 +434,9 @@ async def inscribir_alumnos(
         if aid in ya_inscritos:
             continue
 
-        # Crear registro en historial_grados (sin calificación aún)
-        nuevos.append({
-            "idalumno":            aid,
-            "idgrado_anterior":    alumno["idgradoactual"],
-            "idgrado_nuevo":       alumno["idgradoactual"],  # se actualiza al calificar
-            "fecha_examen":        examen["fecha_programada"],
-            "idprofesor_evaluador": idprofesor,
-            "idexamen":            idexamen,
-            "notas":               None,
-        })
+        # Registrar inscripción como pago pendiente.
+        # historial_grados se crea al calificar (cuando ya se conoce idgrado_nuevo).
+        nuevos.append(aid)  # solo trackear quiénes se inscriben
 
         # Generar pago pendiente si el examen tiene costo
         if costo > 0:
@@ -420,15 +456,14 @@ async def inscribir_alumnos(
                 pass  # columna aún no existe, el pago se identifica por concepto
             pagos_nuevos.append(pago_row)
 
-    if nuevos:
-        db.table("historial_grados").insert(nuevos).execute()
+    # nuevos = lista de idalumnos inscritos (el historial se crea al calificar)
     if pagos_nuevos:
         db.table("pagos").insert(pagos_nuevos).execute()
 
     return {
-        "ok":           True,
-        "inscritos":    len(nuevos),
-        "ya_estaban":   len(alumnos_validos) - len(nuevos),
+        "ok":              True,
+        "inscritos":       len(nuevos),
+        "ya_estaban":      len(alumnos_validos) - len(nuevos),
         "pagos_generados": len(pagos_nuevos),
         "mensaje": f"{len(nuevos)} alumno(s) inscritos. {len(pagos_nuevos)} pago(s) generado(s).",
     }
@@ -448,13 +483,25 @@ async def quitar_alumno_examen(
     # Verificar que no tenga calificación ya registrada
     hist = db.table("historial_grados").select("idhistorial, calificacion")\
         .eq("idexamen", idexamen).eq("idalumno", idalumno).execute()
-    if not hist.data:
-        raise HTTPException(404, "El alumno no está inscrito en este examen.")
-    if hist.data[0].get("calificacion") is not None:
+    if hist.data and hist.data[0].get("calificacion") is not None:
         raise HTTPException(400, "No se puede quitar al alumno: ya tiene calificación registrada.")
 
-    db.table("historial_grados").delete()\
-        .eq("idexamen", idexamen).eq("idalumno", idalumno).execute()
+    # Si no hay historial verificar que tiene pago (inscripción sin calificar)
+    if not hist.data:
+        try:
+            pago_chk = db.table("pagos").select("idpago")\
+                .eq("idexamen_ref", idexamen).eq("idalumno", idalumno).execute()
+            if not pago_chk.data:
+                raise HTTPException(404, "El alumno no está inscrito en este examen.")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(404, "El alumno no está inscrito en este examen.")
+
+    # Eliminar historial si existe
+    if hist.data:
+        db.table("historial_grados").delete()\
+            .eq("idexamen", idexamen).eq("idalumno", idalumno).execute()
 
     # Anular pago pendiente
     try:
@@ -481,16 +528,18 @@ async def calificar_alumno(
     Registra la calificación de un alumno.
     BLOQUEA si el pago del examen está pendiente (estatus=0).
     Si aprueba (cal >= 6.0 por defecto), actualiza su grado actual.
+    Crea el registro en historial_grados si no existe (flujo: inscribir → calificar).
     """
     rol, idescuela, idprofesor = _resolver_rol(current_user, db)
-    _validar_examen(idexamen, idescuela, db)
+    examen = _validar_examen(idexamen, idescuela, db)
 
-    # Verificar que el alumno está inscrito
-    hist_res = db.table("historial_grados").select("*")\
-        .eq("idexamen", idexamen).eq("idalumno", body.idalumno).execute()
-    if not hist_res.data:
-        raise HTTPException(404, "El alumno no está inscrito en este examen.")
-    hist = hist_res.data[0]
+    # Verificar que el alumno pertenece a la escuela
+    alumno_res = db.table("alumnos")\
+        .select("idalumno, idgradoactual, idescuela")\
+        .eq("idalumno", body.idalumno).execute()
+    if not alumno_res.data or alumno_res.data[0]["idescuela"] != idescuela:
+        raise HTTPException(404, "Alumno no encontrado en esta escuela.")
+    alumno = alumno_res.data[0]
 
     # ── BLOQUEO PRINCIPAL: verificar pago ────────────────────
     try:
@@ -504,7 +553,7 @@ async def calificar_alumno(
                     "No se puede registrar la calificación: el alumno tiene el pago del examen pendiente."
                 )
     except HTTPException:
-        raise  # re-lanzar el 400 de pago pendiente
+        raise
     except Exception:
         pass  # columna idexamen_ref aún no existe — se permite calificar
 
@@ -512,32 +561,52 @@ async def calificar_alumno(
     if not (0 <= body.calificacion <= 10):
         raise HTTPException(400, "La calificación debe estar entre 0 y 10.")
 
-    aprobado = body.aprobado if body.aprobado is not None else (body.calificacion >= 6.0)
+    aprobado     = body.aprobado if body.aprobado is not None else (body.calificacion >= 6.0)
+    idgrado_ant  = alumno["idgradoactual"]
+    idgrado_nvo  = body.idgrado_nuevo
 
-    # Actualizar historial
-    update_hist = {
-        "calificacion":  body.calificacion,
-        "aprobado":      aprobado,
-        "idgrado_nuevo": body.idgrado_nuevo,
-        "notas":         body.notas,
+    if aprobado and idgrado_nvo == idgrado_ant:
+        raise HTTPException(400, "El grado nuevo debe ser diferente al anterior cuando el alumno aprueba.")
+
+    # Buscar si ya existe registro en historial_grados para este examen+alumno
+    hist_res = db.table("historial_grados").select("idhistorial")\
+        .eq("idexamen", idexamen).eq("idalumno", body.idalumno).execute()
+
+    hist_data = {
+        "calificacion":        body.calificacion,
+        "aprobado":            aprobado,
+        "idgrado_nuevo":       idgrado_nvo,
+        "idgrado_anterior":    idgrado_ant,
+        "notas":               body.notas,
+        "fecha_examen":        examen["fecha_programada"],
+        "idprofesor_evaluador": idprofesor,
+        "idexamen":            idexamen,
+        "idalumno":            body.idalumno,
     }
-    # Validar que grado_nuevo != grado_anterior si aprobó
-    if aprobado and body.idgrado_nuevo == hist["idgrado_anterior"]:
-        raise HTTPException(400, "El grado nuevo debe ser diferente al grado anterior cuando el alumno aprueba.")
 
-    db.table("historial_grados").update(update_hist)\
-        .eq("idhistorial", hist["idhistorial"]).execute()
+    if hist_res.data:
+        # Ya existe — actualizar
+        db.table("historial_grados").update({
+            "calificacion":     body.calificacion,
+            "aprobado":         aprobado,
+            "idgrado_nuevo":    idgrado_nvo,
+            "idgrado_anterior": idgrado_ant,
+            "notas":            body.notas,
+        }).eq("idhistorial", hist_res.data[0]["idhistorial"]).execute()
+    else:
+        # No existe — crear (ahora con idgrado_nuevo real, satisface la constraint)
+        db.table("historial_grados").insert(hist_data).execute()
 
     # Si aprobó → actualizar grado actual del alumno
     if aprobado:
-        db.table("alumnos").update({"idgradoactual": body.idgrado_nuevo})\
+        db.table("alumnos").update({"idgradoactual": idgrado_nvo})\
             .eq("idalumno", body.idalumno).execute()
 
     return {
-        "ok":          True,
-        "idalumno":    body.idalumno,
+        "ok":           True,
+        "idalumno":     body.idalumno,
         "calificacion": body.calificacion,
-        "aprobado":    aprobado,
-        "grado_nuevo": body.idgrado_nuevo if aprobado else None,
-        "mensaje": "Calificación registrada." + (" Grado actualizado." if aprobado else " Alumno reprobado."),
+        "aprobado":     aprobado,
+        "grado_nuevo":  idgrado_nvo if aprobado else None,
+        "mensaje":      "Calificación registrada." + (" Grado actualizado." if aprobado else " Alumno reprobado."),
     }
