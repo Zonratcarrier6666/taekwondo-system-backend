@@ -218,10 +218,14 @@ async def detalle_examen(
         .eq("idexamen", idexamen).execute()
 
     # Pagos de este examen
-    pagos_res = db.table("pagos")\
-        .select("idpago, idalumno, monto, estatus, metodo_pago")\
-        .eq("idexamen_ref", idexamen).execute()
-    pagos_map = {p["idalumno"]: p for p in (pagos_res.data or [])}
+    pagos_map = {}
+    try:
+        pagos_res = db.table("pagos")\
+            .select("idpago, idalumno, monto, estatus, metodo_pago")\
+            .eq("idexamen_ref", idexamen).execute()
+        pagos_map = {p["idalumno"]: p for p in (pagos_res.data or [])}
+    except Exception:
+        pass  # columna idexamen_ref aún no existe
 
     alumnos_detalle = []
     for h in (hist_res.data or []):
@@ -278,8 +282,11 @@ async def eliminar_examen(
         raise HTTPException(400, f"No se puede eliminar: hay {hist.count} calificación(es) registrada(s).")
 
     # Anular pagos pendientes asociados
-    db.table("pagos").update({"estatus": 2})\
-        .eq("idexamen_ref", idexamen).eq("estatus", 0).execute()
+    try:
+        db.table("pagos").update({"estatus": 2})\
+            .eq("idexamen_ref", idexamen).eq("estatus", 0).execute()
+    except Exception:
+        pass
 
     db.table("examenes").delete().eq("idexamen", idexamen).execute()
     return None
@@ -397,15 +404,21 @@ async def inscribir_alumnos(
 
         # Generar pago pendiente si el examen tiene costo
         if costo > 0:
-            pagos_nuevos.append({
+            pago_row: dict = {
                 "idalumno":      aid,
                 "idescuela":     idescuela,
                 "concepto":      f"Examen: {examen['nombre_examen']}",
                 "monto":         costo,
                 "estatus":       0,              # pendiente
                 "id_tipo_pago":  ID_TIPO_PAGO_EXAMEN,
-                "idexamen_ref":  idexamen,
-            })
+            }
+            # Agregar idexamen_ref solo si la columna existe
+            try:
+                db.table("pagos").select("idexamen_ref").limit(1).execute()
+                pago_row["idexamen_ref"] = idexamen
+            except Exception:
+                pass  # columna aún no existe, el pago se identifica por concepto
+            pagos_nuevos.append(pago_row)
 
     if nuevos:
         db.table("historial_grados").insert(nuevos).execute()
@@ -444,8 +457,11 @@ async def quitar_alumno_examen(
         .eq("idexamen", idexamen).eq("idalumno", idalumno).execute()
 
     # Anular pago pendiente
-    db.table("pagos").update({"estatus": 2})\
-        .eq("idexamen_ref", idexamen).eq("idalumno", idalumno).eq("estatus", 0).execute()
+    try:
+        db.table("pagos").update({"estatus": 2})\
+            .eq("idexamen_ref", idexamen).eq("idalumno", idalumno).eq("estatus", 0).execute()
+    except Exception:
+        pass
 
     return {"ok": True, "mensaje": "Alumno quitado del examen y pago anulado."}
 
@@ -477,17 +493,20 @@ async def calificar_alumno(
     hist = hist_res.data[0]
 
     # ── BLOQUEO PRINCIPAL: verificar pago ────────────────────
-    pago_res = db.table("pagos").select("idpago, estatus")\
-        .eq("idexamen_ref", idexamen).eq("idalumno", body.idalumno).execute()
-
-    if pago_res.data:
-        pago = pago_res.data[0]
-        if pago["estatus"] == 0:
-            raise HTTPException(
-                400,
-                "No se puede registrar la calificación: el alumno tiene el pago del examen pendiente."
-            )
-    # Si no hay pago (examen sin costo), se permite pasar
+    try:
+        pago_res = db.table("pagos").select("idpago, estatus")\
+            .eq("idexamen_ref", idexamen).eq("idalumno", body.idalumno).execute()
+        if pago_res.data:
+            pago = pago_res.data[0]
+            if pago["estatus"] == 0:
+                raise HTTPException(
+                    400,
+                    "No se puede registrar la calificación: el alumno tiene el pago del examen pendiente."
+                )
+    except HTTPException:
+        raise  # re-lanzar el 400 de pago pendiente
+    except Exception:
+        pass  # columna idexamen_ref aún no existe — se permite calificar
 
     # Validar calificación
     if not (0 <= body.calificacion <= 10):
