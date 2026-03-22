@@ -304,3 +304,132 @@ def enviar_confirmacion_cobro(
     except Exception as e:
         print(f"[COBRO EMAIL ✗] {e}")
         return False
+
+# ─────────────────────────────────────────────────────────────
+#  NUEVO v2: Correo de confirmación de pago de torneo SIN QR
+#  El QR se entrega en el check-in presencial el día del torneo.
+# ─────────────────────────────────────────────────────────────
+
+def _html_pago_torneo_confirmado(
+    nombre_alumno: str,
+    nombre_torneo: str,
+    fecha_torneo: str,
+    hora_torneo: str,
+    sede_torneo: str,
+    ciudad_torneo: str,
+    descripcion: str,
+    folio: str,
+    monto: float,
+    metodo_pago: str,
+    nombre_escuela: str = "Dragon Negro Dojo",
+) -> str:
+    desc_bloque = (
+        f'<p style="font-size:13px;color:#374151;margin:0 0 16px">{descripcion}</p>'
+        if descripcion else ""
+    )
+    return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<style>
+  body{{font-family:Arial,sans-serif;background:#f1f5f9;margin:0;padding:0}}
+  .w{{max-width:520px;margin:32px auto;background:#fff;border-radius:20px;
+      box-shadow:0 4px 24px rgba(0,0,0,.10);overflow:hidden}}
+  .h{{background:linear-gradient(135deg,#7c3aed,#06b6d4);padding:28px;text-align:center}}
+  .h h1{{color:#fff;margin:0;font-size:20px;font-weight:900}}
+  .h p{{color:rgba(255,255,255,.8);margin:6px 0 0;font-size:13px}}
+  .b{{padding:24px}}
+  .check{{font-size:48px;text-align:center;padding:12px 0}}
+  .section-title{{font-size:11px;font-weight:700;color:#7c3aed;
+                  text-transform:uppercase;letter-spacing:.08em;
+                  margin:20px 0 8px;border-bottom:1px solid #e2e8f0;padding-bottom:4px}}
+  .row{{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f8fafc}}
+  .row span:first-child{{color:#64748b;font-size:13px}}
+  .row span:last-child{{color:#0f172a;font-size:13px;font-weight:700}}
+  .monto{{font-size:32px;font-weight:900;color:#7c3aed;text-align:center;padding:16px 0 4px}}
+  .aviso{{background:#fef9ec;border:1px solid #fcd34d;border-radius:12px;
+          padding:14px 16px;margin:20px 0;font-size:12px;color:#92400e}}
+  .aviso strong{{display:block;margin-bottom:4px;font-size:13px}}
+  .foot{{background:#f8fafc;padding:14px;text-align:center;
+         color:#94a3b8;font-size:11px;border-top:1px solid #e2e8f0}}
+</style></head><body>
+<div class="w">
+  <div class="h">
+    <h1>🏆 {nombre_escuela}</h1>
+    <p>Inscripción al torneo confirmada</p>
+  </div>
+  <div class="b">
+    <div class="check">✅</div>
+    <p style="text-align:center;font-size:15px;color:#0f172a;font-weight:700;margin:0 0 4px">
+      ¡Pago recibido!
+    </p>
+    <p style="text-align:center;font-size:13px;color:#64748b;margin:0 0 16px">
+      <strong>{nombre_alumno}</strong> está inscrito en el torneo.
+    </p>
+    {desc_bloque}
+    <p class="section-title">Datos del pago</p>
+    <div class="row"><span>Folio</span><span>{folio}</span></div>
+    <div class="row"><span>Método</span><span>{metodo_pago}</span></div>
+    <div class="monto">${monto:,.2f} MXN</div>
+    <p class="section-title">Datos del torneo</p>
+    <div class="row"><span>Torneo</span><span>{nombre_torneo}</span></div>
+    <div class="row"><span>Fecha</span><span>{fecha_torneo}</span></div>
+    <div class="row"><span>Hora de inicio</span><span>{hora_torneo}</span></div>
+    <div class="row"><span>Sede</span><span>{sede_torneo}</span></div>
+    <div class="row"><span>Ciudad</span><span>{ciudad_torneo}</span></div>
+    <div class="aviso">
+      <strong>📋 ¿Qué sigue?</strong>
+      El día del torneo, preséntate en el área de registro con una identificación.
+      El personal del evento realizará el check-in y entregará el gafete con código QR
+      necesario para participar en los combates.
+    </div>
+  </div>
+  <div class="foot">Generado automáticamente · TKW System · {nombre_escuela}</div>
+</div></body></html>"""
+
+
+def enviar_confirmacion_pago_torneo(
+    correo_tutor: str,
+    nombre_alumno: str,
+    nombre_torneo: str,
+    fecha_torneo: str,
+    hora_torneo: str,
+    sede_torneo: str,
+    ciudad_torneo: str,
+    descripcion: str,
+    folio: str,
+    monto: float,
+    metodo_pago: str,
+    nombre_escuela: str = "Dragon Negro Dojo",
+) -> bool:
+    """
+    Envía correo de confirmación de pago de torneo SIN QR.
+    El QR se entrega en el check-in presencial el día del torneo.
+    """
+    try:
+        html = _html_pago_torneo_confirmado(
+            nombre_alumno  = nombre_alumno,
+            nombre_torneo  = nombre_torneo,
+            fecha_torneo   = fecha_torneo,
+            hora_torneo    = hora_torneo,
+            sede_torneo    = sede_torneo,
+            ciudad_torneo  = ciudad_torneo,
+            descripcion    = descripcion,
+            folio          = folio,
+            monto          = monto,
+            metodo_pago    = metodo_pago,
+            nombre_escuela = nombre_escuela,
+        )
+        result = send_resend_email(
+            to         = correo_tutor,
+            subject    = f"✅ Inscripción confirmada — {nombre_torneo} | {nombre_alumno}",
+            html       = html,
+            from_email = f"{nombre_escuela} <onboarding@resend.dev>",
+        )
+        ok = result.get("success", False)
+        if ok:
+            print(f"[TORNEO EMAIL ✓] → {correo_tutor}")
+        else:
+            print(f"[TORNEO EMAIL ✗] {result.get('error')}")
+        return ok
+
+    except Exception as e:
+        print(f"[TORNEO EMAIL ✗] {e}")
+        return False

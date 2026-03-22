@@ -440,18 +440,19 @@ async def cobrar_pago(
 ):
     """
     Cambia el estatus de un pago a PAGADO.
-    - Tipo TORNEO (4): genera QR + PDF y envía al tutor.
+    - Tipo TORNEO (4): actualiza estatus_pago en inscripciones_torneo
+                       y envía correo con datos del torneo (SIN QR).
+                       El QR se genera en el check-in del día del torneo.
     - Cualquier otro tipo: envía confirmación de cobro al tutor.
-    Ambos usan Resend (no SMTP).
     """
     _require_staff(user)
-
+ 
     # 1. Obtener datos del pago
     p_res = db.table("pagos").select("*").eq("idpago", body.idpago).execute()
     if not p_res.data:
         raise HTTPException(404, "No se encontró el registro de pago")
     pago = p_res.data[0]
-
+ 
     # 2. Marcar como PAGADO
     db.table("pagos").update({
         "estatus":           int(EstatusPago.PAGADO),
@@ -460,91 +461,91 @@ async def cobrar_pago(
         "url_comprobante":   body.url_comprobante,
         "notas_adicionales": body.notas,
     }).eq("idpago", body.idpago).execute()
-
+ 
     # 3. Datos compartidos: alumno y escuela
     al_res  = db.table("alumnos").select("*")\
                 .eq("idalumno", pago["idalumno"]).execute()
     esc_res = db.table("datosescuela").select("nombreescuela")\
                 .eq("idescuela", pago.get("idescuela", 0)).execute()
-
+ 
     correo_tutor   = None
     nombre_alumno  = "Alumno"
     nombre_escuela = "Dragon Negro Dojo"
-
+ 
     if al_res.data:
         al            = al_res.data[0]
         correo_tutor  = al.get("correotutor")
         nombre_alumno = f"{al['nombres']} {al['apellidopaterno']}"
     if esc_res.data:
         nombre_escuela = esc_res.data[0].get("nombreescuela", nombre_escuela)
-
-    # 4a. TORNEO → QR + PDF
+ 
+    # ──────────────────────────────────────────────────────────
+    # 4a. TORNEO → Solo actualizar estatus_pago + correo de datos
+    #     (SIN generar token_qr — eso ocurre en check-in)
+    # ──────────────────────────────────────────────────────────
     if pago.get("id_tipo_pago") == int(TipoPago.TORNEO):
         desglose      = pago.get("desglose_interno") or {}
         idinscripcion = desglose.get("idinscripcion")
         idtorneo      = desglose.get("idtorneo")
-
-        if idinscripcion and idtorneo and al_res.data:
-            token_qr = generar_token_qr()
+ 
+        if idinscripcion:
+            # Solo marcar como Pagado — token_qr queda NULL hasta check-in
             db.table("inscripciones_torneo").update({
-                "estatus_pago": "pagado",
-                "token_qr":     token_qr,
+                "estatus_pago": "Pagado",
+                "idpago":       body.idpago,
             }).eq("idinscripcion", idinscripcion).execute()
-
-            t_res = db.table("torneos").select("*")\
-                      .eq("idtorneo", idtorneo).execute()
-            if t_res.data:
-                torneo = t_res.data[0]
-                try:
-                    pdf_bytes = generar_pdf_qr(
-                        token         = token_qr,
-                        nombre_alumno = nombre_alumno,
-                        nombre_torneo = torneo["nombre"],
-                        fecha_torneo  = torneo["fecha"],
-                        hora_torneo   = torneo.get("hora_inicio", "09:00"),
-                        sede_torneo   = torneo["sede"],
-                        ciudad_torneo = torneo["ciudad"],
-                        cinta         = "Confirmada",
-                        edad          = _calcular_edad(al.get("fechanacimiento", "")),
-                        peso          = al.get("peso"),
+ 
+        # Enviar correo de confirmación con datos del torneo (sin QR)
+        if idtorneo and correo_tutor:
+            try:
+                t_res = db.table("torneos").select(
+                    "nombre, fecha, hora_inicio, sede, ciudad, descripcion"
+                ).eq("idtorneo", idtorneo).execute()
+ 
+                if t_res.data:
+                    torneo = t_res.data[0]
+                    enviar_confirmacion_pago_torneo(
+                        correo_tutor   = correo_tutor,
+                        nombre_alumno  = nombre_alumno,
+                        nombre_torneo  = torneo["nombre"],
+                        fecha_torneo   = str(torneo["fecha"]),
+                        hora_torneo    = torneo.get("hora_inicio", "09:00"),
+                        sede_torneo    = torneo["sede"],
+                        ciudad_torneo  = torneo.get("ciudad", ""),
+                        descripcion    = torneo.get("descripcion", ""),
+                        folio          = pago.get("folio_recibo", ""),
+                        monto          = float(pago.get("monto") or 0),
+                        metodo_pago    = body.metodo_pago.value,
+                        nombre_escuela = nombre_escuela,
                     )
-                    if correo_tutor:
-                        enviar_qr_por_correo(
-                            token         = token_qr,
-                            correo_tutor  = correo_tutor,
-                            nombre_alumno = nombre_alumno,
-                            nombre_torneo = torneo["nombre"],
-                            fecha_torneo  = torneo["fecha"],
-                            hora_torneo   = torneo.get("hora_inicio", "09:00"),
-                            sede_torneo   = torneo["sede"],
-                            ciudad_torneo = torneo["ciudad"],
-                            pdf_bytes     = pdf_bytes,
-                            from_name     = nombre_escuela,
-                        )
-                except Exception as e:
-                    # El cobro ya quedó guardado — no revertir por error de email
-                    print(f"[ERROR QR/PDF] idpago={body.idpago}: {e}")
-
-    # 4b. MENSUALIDAD / INSCRIPCIÓN / EXAMEN / OTRO → confirmación simple
+            except Exception as e:
+                # El cobro ya quedó guardado — no revertir por error de email
+                print(f"[ERROR EMAIL TORNEO] idpago={body.idpago}: {e}")
+ 
+    # ──────────────────────────────────────────────────────────
+    # 4b. MENSUALIDAD / INSCRIPCIÓN / EXAMEN / OTRO
+    # ──────────────────────────────────────────────────────────
     else:
         if correo_tutor:
             try:
                 enviar_confirmacion_cobro(
-                    correo_tutor  = correo_tutor,
-                    nombre_alumno = nombre_alumno,
-                    concepto      = pago.get("concepto", "Pago"),
-                    monto         = float(pago.get("monto") or 0),
-                    metodo_pago   = body.metodo_pago.value,
-                    folio         = pago.get("folio_recibo", ""),
+                    correo_tutor   = correo_tutor,
+                    nombre_alumno  = nombre_alumno,
+                    concepto       = pago.get("concepto", "Pago"),
+                    monto          = float(pago.get("monto") or 0),
+                    metodo_pago    = body.metodo_pago.value,
+                    folio          = pago.get("folio_recibo", ""),
                     nombre_escuela = nombre_escuela,
                 )
             except Exception as e:
                 print(f"[ERROR EMAIL COBRO] idpago={body.idpago}: {e}")
         else:
             print(f"[COBRO] idpago={body.idpago} — alumno sin correotutor, no se envió email")
-
-    return {"ok": True, "mensaje": "Cobro registrado y QR enviado al correo"}
-
+ 
+    return {
+        "ok":     True,
+        "mensaje": "Cobro registrado. Se notificó al tutor con los datos del torneo.",
+    }
 
 @router.post("/cobrar/lote")
 async def cobrar_lote(

@@ -1,7 +1,5 @@
 # ============================================================
-#  app/routers/areas_checkin.py
-#
-#  Cubre los flujos NUEVOS del sistema de torneos v2:
+#  app/routers/areas_checkin.py  — v2
 #
 #  ÁREAS DE COMBATE
 #    POST /torneos/{id}/areas              → crear área (SuperAdmin)
@@ -10,23 +8,27 @@
 #    DELETE /torneos/{id}/areas/{idarea}   → eliminar área
 #
 #  CHECK-IN (día del torneo)
-#    GET  /torneos/{id}/checkin/pendientes → inscritos pagados sin check-in
-#    POST /torneos/{id}/checkin/{idinsc}   → staff confirma llegada y genera QR
-#    POST /torneos/{id}/checkin/lote       → confirmar varios a la vez
+#    GET  /torneos/{id}/checkin/pendientes       → inscritos pagados sin check-in
+#    GET  /torneos/{id}/checkin/lista-completa   → todos los inscritos con estados [NUEVO]
+#    POST /torneos/{id}/checkin/{idinsc}         → staff confirma llegada y genera QR
+#    POST /torneos/{id}/checkin/lote             → confirmar varios a la vez
+#    GET  /torneos/{id}/checkin/{idinsc}/gafete-pdf → descargar PDF del gafete [NUEVO]
 #
 #  ESCANEO QR (juez en el área)
-#    POST /qr/escanear                     → juez escanea QR, verifica área, retorna pantalla
-#    POST /qr/invalidar/{idinsc}           → invalida QR al perder (competencia)
+#    POST /qr/escanear                     → juez escanea QR (v2: estado area_incorrecta)
+#    POST /qr/invalidar/{idinsc}           → invalida QR al perder
+#    POST /torneos/{id}/qr/descalificar/{idinsc} → descalifica por ausencia [NUEVO]
 #
 #  MODALIDAD LOCAL
-#    POST /combates/{id}/resultado-local   → juez declara ganador (sin puntos) + asigna lugar
+#    POST /combates/{id}/resultado-local   → juez declara ganador + asigna lugar
 #    POST /torneos/{id}/podio              → asignar 1°/2°/3° manualmente
 #    GET  /torneos/{id}/resultados-local   → tabla de posiciones
 #
 #  MATCHMAKING EDITABLE
-#    GET  /torneos/{id}/matchmaking/preview  → vista previa de emparejamientos
+#    GET  /torneos/{id}/matchmaking/preview   → vista previa de emparejamientos
 #    PUT  /torneos/{id}/matchmaking/reasignar → mover competidor a otro combate
 #    POST /torneos/{id}/matchmaking/confirmar → confirmar y guardar combates en BD
+#    POST /torneos/{id}/areas/{idarea}/asignar-combate/{idcombate} → asignar combate a área
 #
 # ============================================================
 
@@ -36,11 +38,13 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi.responses import Response
 from pydantic import BaseModel
 from supabase import Client
 
-from utils.database   import get_db
-from utils.auth_utils import get_current_user
+from utils.database    import get_db
+from utils.auth_utils  import get_current_user
+from utils.qr_generator import generar_pdf_qr
 
 router = APIRouter(tags=["Torneos y Competencias"])
 
@@ -68,29 +72,26 @@ def _siguiente_potencia_2(n: int) -> int:
 # ─── Schemas ─────────────────────────────────────────────────
 
 class CrearArea(BaseModel):
-    nombre_area:      str              # "Área 1", "Ring A", etc.
+    nombre_area:      str
     idjuez_asignado:  Optional[int] = None
 
 class EditarArea(BaseModel):
     nombre_area:      Optional[str] = None
     idjuez_asignado:  Optional[int] = None
-    estatus:          Optional[str] = None   # disponible | en_combate | inactiva
+    estatus:          Optional[str] = None
 
 class CheckinLote(BaseModel):
     idinscripciones: list[int]
 
 class ResultadoLocal(BaseModel):
-    id_ganador:    int   # idinscripcion del ganador
-    # No se pasan puntos — el juez solo dice quién ganó
+    id_ganador: int
 
 class AsignarPodio(BaseModel):
-    # Lista de { idinscripcion, lugar } para asignar manualmente
-    podio: list[dict]   # [{"idinscripcion": 5, "lugar": 1}, ...]
+    podio: list[dict]
 
 class ReasignarMatchmaking(BaseModel):
-    # Intercambiar dos competidores entre combates o mover uno
     idinscripcion_a: int
-    idinscripcion_b: int   # con quién se intercambia (puede ser None para BYE)
+    idinscripcion_b: int
 
 
 # ═════════════════════════════════════════════════════════════
@@ -107,12 +108,10 @@ async def crear_area(
 ):
     _require_roles(user, ["SuperAdmin"])
 
-    # Verificar torneo
     t = db.table("torneos").select("idtorneo, nombre").eq("idtorneo", idtorneo).execute()
     if not t.data:
         raise HTTPException(404, "Torneo no encontrado")
 
-    # Verificar juez si se asigna
     if body.idjuez_asignado:
         u = db.table("usuarios").select("idusuario, username, rol")\
             .eq("idusuario", body.idjuez_asignado).execute()
@@ -146,16 +145,15 @@ async def listar_areas(
     areas = []
     for a in areas_res.data or []:
         juez = a.get("usuarios") or {}
-        # Combates pendientes de esta área
         pendientes = db.table("combates").select("idcombate")\
             .eq("idarea", a["idarea"])\
             .eq("estatus", "pendiente").execute()
         areas.append({
-            "idarea":           a["idarea"],
-            "nombre_area":      a["nombre_area"],
-            "estatus":          a["estatus"],
-            "idjuez_asignado":  a["idjuez_asignado"],
-            "juez_username":    juez.get("username"),
+            "idarea":              a["idarea"],
+            "nombre_area":         a["nombre_area"],
+            "estatus":             a["estatus"],
+            "idjuez_asignado":     a["idjuez_asignado"],
+            "juez_username":       juez.get("username"),
             "combates_pendientes": len(pendientes.data or []),
         })
 
@@ -182,7 +180,6 @@ async def editar_area(
     if not upd:
         raise HTTPException(400, "Nada que actualizar")
 
-    # Validar juez si se cambia
     if "idjuez_asignado" in upd:
         u = db.table("usuarios").select("rol")\
             .eq("idusuario", upd["idjuez_asignado"]).execute()
@@ -280,6 +277,85 @@ async def checkin_pendientes(
     }
 
 
+@router.get("/torneos/{idtorneo}/checkin/lista-completa",
+            summary="Lista completa de inscritos con estatus de pago y check-in")
+async def lista_completa_checkin(
+    idtorneo:  int,
+    idescuela: Optional[int] = Query(None),
+    buscar:    Optional[str] = Query(None, description="Nombre del alumno"),
+    db:   Client = Depends(get_db),
+    user: dict   = Depends(get_current_user),
+):
+    _require_roles(user, ["SuperAdmin", "Staff", "Escuela", "Profesor"])
+
+    q = db.table("inscripciones_torneo").select(
+        "idinscripcion, idalumno, idescuela, idcategoria, estatus_pago, "
+        "estatus_checkin, token_qr, hora_llegada, peso_declarado, peso_bascula, "
+        "asistio, lugar_obtenido, idarea_asignada, "
+        "alumnos(nombres, apellidopaterno, fotoalumno, fechanacimiento, "
+        "  cintasgrados(nivelkupdan, color)), "
+        "datosescuela!inscripciones_torneo_idescuela_fkey(nombreescuela), "
+        "torneo_categorias(nombre_categoria), "
+        "areas_combate(nombre_area)"
+    ).eq("idtorneo", idtorneo)
+
+    if idescuela:
+        q = q.eq("idescuela", idescuela)
+
+    res = q.execute()
+    inscritos = res.data or []
+
+    resultado = []
+    for i in inscritos:
+        al   = i.get("alumnos") or {}
+        cg   = al.get("cintasgrados") or {}
+        esc  = i.get("datosescuela") or {}
+        cat  = i.get("torneo_categorias") or {}
+        area = i.get("areas_combate") or {}
+
+        nombre = f"{al.get('nombres', '')} {al.get('apellidopaterno', '')}".strip()
+
+        if buscar and buscar.lower() not in nombre.lower():
+            continue
+
+        resultado.append({
+            "idinscripcion":   i["idinscripcion"],
+            "idalumno":        i["idalumno"],
+            "nombre_alumno":   nombre,
+            "foto":            al.get("fotoalumno"),
+            "edad":            _calcular_edad(al.get("fechanacimiento", "")),
+            "cinta":           cg.get("nivelkupdan", ""),
+            "color_cinta":     cg.get("color", ""),
+            "escuela":         esc.get("nombreescuela", ""),
+            "idescuela":       i.get("idescuela"),
+            "categoria":       cat.get("nombre_categoria", "Sin categoría"),
+            "area_asignada":   area.get("nombre_area"),
+            "idarea_asignada": i.get("idarea_asignada"),
+            "estatus_pago":    i.get("estatus_pago"),
+            "estatus_checkin": i.get("estatus_checkin", False),
+            "tiene_qr":        bool(i.get("token_qr")),
+            "hora_llegada":    i.get("hora_llegada"),
+            "peso_declarado":  i.get("peso_declarado"),
+            "peso_bascula":    i.get("peso_bascula"),
+            "asistio":         i.get("asistio", False),
+            "lugar_obtenido":  i.get("lugar_obtenido"),
+        })
+
+    total           = len(resultado)
+    pagados         = sum(1 for r in resultado if r["estatus_pago"] == "Pagado")
+    con_checkin     = sum(1 for r in resultado if r["estatus_checkin"])
+    pendientes_pago = sum(1 for r in resultado if r["estatus_pago"] != "Pagado")
+
+    return {
+        "ok":              True,
+        "total":           total,
+        "pagados":         pagados,
+        "con_checkin":     con_checkin,
+        "pendientes_pago": pendientes_pago,
+        "inscritos":       resultado,
+    }
+
+
 @router.post("/torneos/{idtorneo}/checkin/{idinscripcion}",
              summary="Staff confirma llegada y genera QR/gafete del competidor")
 async def hacer_checkin(
@@ -291,7 +367,6 @@ async def hacer_checkin(
 ):
     _require_roles(user, ["SuperAdmin", "Staff", "Escuela"])
 
-    # Verificar inscripción
     insc_res = db.table("inscripciones_torneo").select(
         "*, alumnos(nombres, apellidopaterno, fotoalumno, fechanacimiento), "
         "torneo_categorias(nombre_categoria), "
@@ -310,16 +385,14 @@ async def hacer_checkin(
             "Confirma el pago en Caja antes del check-in.")
 
     if insc.get("estatus_checkin"):
-        # Ya hizo check-in — devolver el QR existente
         return {
-            "ok":      True,
-            "mensaje": "Este competidor ya hizo check-in anteriormente",
-            "ya_existia": True,
-            "token_qr": insc.get("token_qr"),
+            "ok":           True,
+            "mensaje":      "Este competidor ya hizo check-in anteriormente",
+            "ya_existia":   True,
+            "token_qr":     insc.get("token_qr"),
             "datos_gafete": _armar_gafete(insc),
         }
 
-    # Generar QR único
     token = str(uuid.uuid4())
 
     upd = {
@@ -327,7 +400,7 @@ async def hacer_checkin(
         "token_qr":        token,
         "hora_llegada":    datetime.now().isoformat(),
         "asistio":         True,
-        "qr_usado":        False,   # False = QR activo (aún no perdió)
+        "qr_usado":        False,
     }
     if peso_bascula is not None:
         upd["peso_bascula"] = peso_bascula
@@ -357,7 +430,6 @@ async def checkin_lote(
     resultados = []
     for idinsc in body.idinscripciones:
         try:
-            # Reutilizar la lógica del check-in individual
             insc_res = db.table("inscripciones_torneo").select("*")\
                 .eq("idinscripcion", idinsc).eq("idtorneo", idtorneo).execute()
             if not insc_res.data:
@@ -392,12 +464,81 @@ async def checkin_lote(
 
     exitosos = [r for r in resultados if r["ok"]]
     return {
-        "ok":        True,
-        "total":     len(body.idinscripciones),
-        "exitosos":  len(exitosos),
-        "fallidos":  len(resultados) - len(exitosos),
-        "detalle":   resultados,
+        "ok":       True,
+        "total":    len(body.idinscripciones),
+        "exitosos": len(exitosos),
+        "fallidos": len(resultados) - len(exitosos),
+        "detalle":  resultados,
     }
+
+
+@router.get("/torneos/{idtorneo}/checkin/{idinscripcion}/gafete-pdf",
+            summary="Descargar PDF del gafete con QR (solo si ya hizo check-in)")
+async def descargar_gafete_pdf(
+    idtorneo:      int,
+    idinscripcion: int,
+    db:   Client = Depends(get_db),
+    user: dict   = Depends(get_current_user),
+):
+    _require_roles(user, ["SuperAdmin", "Staff", "Escuela"])
+
+    insc_res = db.table("inscripciones_torneo").select(
+        "idinscripcion, token_qr, estatus_checkin, peso_bascula, peso_declarado, "
+        "alumnos(nombres, apellidopaterno, fechanacimiento, "
+        "  cintasgrados(nivelkupdan, color)), "
+        "torneo_categorias(nombre_categoria), "
+        "torneos(nombre, fecha, hora_inicio, sede, ciudad)"
+    ).eq("idinscripcion", idinscripcion)\
+     .eq("idtorneo", idtorneo)\
+     .execute()
+
+    if not insc_res.data:
+        raise HTTPException(404, "Inscripción no encontrada")
+
+    insc = insc_res.data[0]
+
+    if not insc.get("estatus_checkin"):
+        raise HTTPException(400,
+            "El competidor aún no ha hecho check-in. "
+            "Realiza el check-in primero para generar el gafete.")
+
+    token = insc.get("token_qr")
+    if not token:
+        raise HTTPException(400,
+            "El competidor no tiene token QR asignado. "
+            "Realiza el check-in nuevamente.")
+
+    al  = insc.get("alumnos") or {}
+    cg  = al.get("cintasgrados") or {}
+    tor = insc.get("torneos") or {}
+
+    nombre_alumno = f"{al.get('nombres', '')} {al.get('apellidopaterno', '')}".strip()
+    cinta         = cg.get("nivelkupdan", "Sin especificar")
+    edad          = _calcular_edad(al.get("fechanacimiento", ""))
+    peso          = insc.get("peso_bascula") or insc.get("peso_declarado")
+
+    try:
+        pdf_bytes = generar_pdf_qr(
+            token         = token,
+            nombre_alumno = nombre_alumno,
+            nombre_torneo = tor.get("nombre", "Torneo"),
+            fecha_torneo  = str(tor.get("fecha", "")),
+            hora_torneo   = tor.get("hora_inicio", "09:00"),
+            sede_torneo   = tor.get("sede", ""),
+            ciudad_torneo = tor.get("ciudad", ""),
+            cinta         = cinta,
+            edad          = edad,
+            peso          = float(peso) if peso else None,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Error generando PDF: {e}")
+
+    filename = f"Gafete_{nombre_alumno.replace(' ', '_')}_{idinscripcion}.pdf"
+    return Response(
+        content    = pdf_bytes,
+        media_type = "application/pdf",
+        headers    = {"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _armar_gafete(insc: dict, token_override: str = None) -> dict:
@@ -408,16 +549,16 @@ def _armar_gafete(insc: dict, token_override: str = None) -> dict:
     tor = insc.get("torneos") or {}
 
     return {
-        "nombre_alumno":   f"{al.get('nombres','')} {al.get('apellidopaterno','')}".strip(),
-        "foto":            al.get("fotoalumno"),
-        "edad":            _calcular_edad(al.get("fechanacimiento", "")),
-        "escuela":         esc.get("nombreescuela", ""),
-        "categoria":       cat.get("nombre_categoria", ""),
-        "torneo":          tor.get("nombre", ""),
-        "fecha_torneo":    str(tor.get("fecha", "")),
-        "sede":            tor.get("sede", ""),
-        "token_qr":        token_override or insc.get("token_qr", ""),
-        "idinscripcion":   insc.get("idinscripcion"),
+        "nombre_alumno": f"{al.get('nombres','')} {al.get('apellidopaterno','')}".strip(),
+        "foto":          al.get("fotoalumno"),
+        "edad":          _calcular_edad(al.get("fechanacimiento", "")),
+        "escuela":       esc.get("nombreescuela", ""),
+        "categoria":     cat.get("nombre_categoria", ""),
+        "torneo":        tor.get("nombre", ""),
+        "fecha_torneo":  str(tor.get("fecha", "")),
+        "sede":          tor.get("sede", ""),
+        "token_qr":      token_override or insc.get("token_qr", ""),
+        "idinscripcion": insc.get("idinscripcion"),
     }
 
 
@@ -426,22 +567,23 @@ def _armar_gafete(insc: dict, token_override: str = None) -> dict:
 # ═════════════════════════════════════════════════════════════
 
 @router.post("/qr/escanear",
-             summary="Juez escanea QR del gafete — verifica área y retorna pantalla Juan vs Pepe")
+             summary="Juez escanea QR — verifica competidor, área y retorna estado")
 async def escanear_qr(
-    token:   str = Body(..., embed=True),
-    idarea:  Optional[int] = Body(None, embed=True),
+    token:  str           = Body(..., embed=True),
+    idarea: Optional[int] = Body(None, embed=True),
     db:   Client = Depends(get_db),
-    user: dict = Depends(get_current_user),
+    user: dict   = Depends(get_current_user),
 ):
     _require_roles(user, ["Juez", "SuperAdmin", "Staff"])
 
-    # Buscar inscripción por token
+    # ── 1. Buscar inscripción por token ──────────────────────
     insc_res = db.table("inscripciones_torneo").select(
         "idinscripcion, idtorneo, idcategoria, idescuela, idarea_asignada, "
         "estatus_checkin, qr_usado, num_combates_realizados, lugar_obtenido, "
         "alumnos(nombres, apellidopaterno, fotoalumno, fechanacimiento, "
         "  cintasgrados(nivelkupdan, color)), "
         "datosescuela!inscripciones_torneo_idescuela_fkey(nombreescuela), "
+        "torneo_categorias(nombre_categoria), "
         "torneos(nombre, tipo_torneo, max_combates_por_competidor)"
     ).eq("token_qr", token).execute()
 
@@ -449,6 +591,7 @@ async def escanear_qr(
         return {
             "ok":      False,
             "valido":  False,
+            "estado":  "invalido",
             "mensaje": "QR inválido o no encontrado",
         }
 
@@ -457,66 +600,74 @@ async def escanear_qr(
     cg   = al.get("cintasgrados") or {}
     esc  = insc.get("datosescuela") or {}
     tor  = insc.get("torneos") or {}
+    cat  = insc.get("torneo_categorias") or {}
 
-    nombre = f"{al.get('nombres','')} {al.get('apellidopaterno','')}".strip()
+    nombre = f"{al.get('nombres', '')} {al.get('apellidopaterno', '')}".strip()
 
-    # ── Validaciones ──
+    # ── 2. ¿Hizo check-in? ───────────────────────────────────
     if not insc.get("estatus_checkin"):
         return {
-            "ok": False, "valido": False,
+            "ok":            False,
+            "valido":        False,
+            "estado":        "sin_checkin",
             "nombre_alumno": nombre,
-            "mensaje": "⚠️ Este competidor no ha hecho check-in",
+            "mensaje":       "⚠️ Este competidor no ha hecho check-in",
         }
 
+    # ── 3. ¿QR ya usado (eliminado / descalificado)? ─────────
     if insc.get("qr_usado"):
-        # En modalidad local puede tener lugar asignado
         lugar = insc.get("lugar_obtenido")
-        msg   = f"🚫 QR inválido — competidor eliminado"
         if lugar:
             msg = f"🏅 Competidor finalizó en {lugar}° lugar"
+        else:
+            msg = "🚫 Competidor eliminado o descalificado"
         return {
-            "ok": False, "valido": False,
-            "nombre_alumno": nombre,
-            "mensaje": msg,
+            "ok":             False,
+            "valido":         False,
+            "estado":         "eliminado",
+            "nombre_alumno":  nombre,
+            "mensaje":        msg,
             "lugar_obtenido": lugar,
         }
 
-    tipo_torneo = tor.get("tipo_torneo", "competencia")
-    max_combates = tor.get("max_combates_por_competidor", 3)
+    # ── 4. Modalidad local: límite de combates ───────────────
+    tipo_torneo    = tor.get("tipo_torneo", "competencia")
+    max_combates   = tor.get("max_combates_por_competidor", 3)
     num_realizados = insc.get("num_combates_realizados", 0)
 
-    # Modalidad local: verificar límite de combates
     if tipo_torneo == "local" and num_realizados >= max_combates:
         return {
-            "ok": False, "valido": False,
+            "ok":            False,
+            "valido":        False,
+            "estado":        "limite_combates",
             "nombre_alumno": nombre,
-            "mensaje": f"⚠️ Competidor alcanzó el límite de {max_combates} combates en modalidad local",
+            "mensaje":       f"⚠️ Competidor alcanzó el límite de {max_combates} combates",
             "num_combates_realizados": num_realizados,
         }
 
-    # Verificar área correcta
-    area_asignada = insc.get("idarea_asignada")
-    en_area_correcta = True
+    # ── 5. Verificar área ────────────────────────────────────
+    area_asignada        = insc.get("idarea_asignada")
+    en_area_correcta     = True
     nombre_area_correcta = None
     nombre_area_actual   = None
 
     if idarea and area_asignada and idarea != area_asignada:
         en_area_correcta = False
-        # Obtener nombres de las áreas
         area_correcta_res = db.table("areas_combate").select("nombre_area")\
             .eq("idarea", area_asignada).execute()
         area_actual_res   = db.table("areas_combate").select("nombre_area")\
             .eq("idarea", idarea).execute()
-        nombre_area_correcta = area_correcta_res.data[0]["nombre_area"] if area_correcta_res.data else f"Área {area_asignada}"
-        nombre_area_actual   = area_actual_res.data[0]["nombre_area"]   if area_actual_res.data   else f"Área {idarea}"
+        nombre_area_correcta = (area_correcta_res.data[0]["nombre_area"]
+                                if area_correcta_res.data else f"Área {area_asignada}")
+        nombre_area_actual   = (area_actual_res.data[0]["nombre_area"]
+                                if area_actual_res.data else f"Área {idarea}")
 
-    # Buscar combate activo del competidor
+    # ── 6. Buscar combate activo del competidor ──────────────
     combate_activo = None
     if idarea:
         idinscripcion = insc["idinscripcion"]
         idtorneo_insc = insc["idtorneo"]
 
-        # Primero buscar combate asignado específicamente a esta área
         c_res = db.table("combates").select(
             "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
         ).eq("idtorneo", idtorneo_insc).eq("estatus", "pendiente")\
@@ -528,7 +679,6 @@ async def escanear_qr(
                 combate_activo = c
                 break
 
-        # Si no encontró con área, buscar cualquier combate pendiente del torneo
         if not combate_activo:
             c_res2 = db.table("combates").select(
                 "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
@@ -539,44 +689,57 @@ async def escanear_qr(
                 if c.get("id_competidor_1") == idinscripcion or \
                    c.get("id_competidor_2") == idinscripcion:
                     combate_activo = c
-                    # Asignar el área a este combate automáticamente
                     db.table("combates").update({"idarea": idarea})\
                         .eq("idcombate", c["idcombate"]).execute()
                     combate_activo["idarea"] = idarea
                     break
 
-    return {
-        "ok":              True,
-        "valido":          True,
-        "en_area_correcta": en_area_correcta,
-        "nombre_alumno":   nombre,
-        "foto":            al.get("fotoalumno"),
-        "edad":            _calcular_edad(al.get("fechanacimiento", "")),
-        "cinta":           cg.get("nivelkupdan", ""),
-        "color_cinta":     cg.get("color", ""),
-        "escuela":         esc.get("nombreescuela", ""),
-        "idinscripcion":   insc["idinscripcion"],
-        "idtorneo":        insc["idtorneo"],
-        "tipo_torneo":     tipo_torneo,
+    # ── 7. Armar datos del competidor para la pantalla ───────
+    datos_competidor = {
+        "idinscripcion":          insc["idinscripcion"],
+        "nombre_alumno":          nombre,
+        "foto":                   al.get("fotoalumno"),
+        "edad":                   _calcular_edad(al.get("fechanacimiento", "")),
+        "cinta":                  cg.get("nivelkupdan", ""),
+        "color_cinta":            cg.get("color", ""),
+        "escuela":                esc.get("nombreescuela", ""),
+        "categoria":              cat.get("nombre_categoria", ""),
+        "torneo":                 tor.get("nombre", ""),
         "num_combates_realizados": num_realizados,
-        "max_combates":    max_combates if tipo_torneo == "local" else None,
-        "combate_activo":  combate_activo,
-        "mensaje": (
-            f"✅ {nombre} — verificado correctamente"
-            if en_area_correcta
-            else f"⚠️ {nombre} pertenece a {nombre_area_correcta}, no a {nombre_area_actual}"
-        ),
-        # Info para redirigir si está en área incorrecta
-        "area_correcta":  nombre_area_correcta,
-        "area_escaneada": nombre_area_actual,
+        "tipo_torneo":            tipo_torneo,
+        "max_combates":           max_combates if tipo_torneo == "local" else None,
+        "combate_activo":         combate_activo,
+    }
+
+    # ── 8. Respuesta según área ──────────────────────────────
+    if not en_area_correcta:
+        return {
+            "ok":              True,
+            "valido":          False,
+            "estado":          "area_incorrecta",
+            "nombre_alumno":   nombre,
+            "mensaje":         f"⚠️ {nombre} no pertenece a esta área. Su combate es en: {nombre_area_correcta}",
+            "area_correcta":   nombre_area_correcta,
+            "idarea_correcta": area_asignada,
+            "area_escaneada":  nombre_area_actual,
+            "competidor":      datos_competidor,
+        }
+
+    return {
+        "ok":        True,
+        "valido":    True,
+        "estado":    "listo",
+        "mensaje":   f"✅ {nombre} — verificado. Puede iniciar el combate.",
+        "competidor": datos_competidor,
     }
 
 
 @router.post("/qr/invalidar/{idinscripcion}",
-             summary="Invalida el QR al perder (modalidad competencia) o asigna lugar (local)")
+             summary="Invalida el QR al perder (competencia) o asigna lugar (local)")
 async def invalidar_qr(
     idinscripcion: int,
-    lugar:         Optional[int] = Body(None, embed=True, description="Solo para modalidad local: 1, 2 o 3"),
+    lugar:         Optional[int] = Body(None, embed=True,
+                                        description="Solo para modalidad local: 1, 2 o 3"),
     db:   Client = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
@@ -589,8 +752,8 @@ async def invalidar_qr(
     if not insc_res.data:
         raise HTTPException(404, "Inscripción no encontrada")
 
-    insc      = insc_res.data[0]
-    tor       = insc.get("torneos") or {}
+    insc        = insc_res.data[0]
+    tor         = insc.get("torneos") or {}
     tipo_torneo = tor.get("tipo_torneo", "competencia")
 
     upd = {"qr_usado": True}
@@ -603,6 +766,50 @@ async def invalidar_qr(
     return {
         "ok":      True,
         "mensaje": f"QR invalidado{'  — lugar asignado: ' + str(lugar) if lugar else ''}",
+    }
+
+
+@router.post("/torneos/{idtorneo}/qr/descalificar/{idinscripcion}",
+             summary="Descalificar competidor por ausencia — desactiva su QR")
+async def descalificar_competidor(
+    idtorneo:      int,
+    idinscripcion: int,
+    motivo: str = Body("No se presentó al área de combate", embed=True),
+    db:   Client = Depends(get_db),
+    user: dict   = Depends(get_current_user),
+):
+    _require_roles(user, ["Juez", "SuperAdmin", "Staff"])
+
+    insc_res = db.table("inscripciones_torneo").select(
+        "idinscripcion, qr_usado, estatus_checkin, "
+        "alumnos(nombres, apellidopaterno)"
+    ).eq("idinscripcion", idinscripcion)\
+     .eq("idtorneo", idtorneo)\
+     .execute()
+
+    if not insc_res.data:
+        raise HTTPException(404, "Inscripción no encontrada")
+
+    insc   = insc_res.data[0]
+    al     = insc.get("alumnos") or {}
+    nombre = f"{al.get('nombres', '')} {al.get('apellidopaterno', '')}".strip()
+
+    if insc.get("qr_usado"):
+        return {
+            "ok":      False,
+            "mensaje": f"El QR de {nombre} ya estaba desactivado.",
+        }
+
+    db.table("inscripciones_torneo").update({
+        "qr_usado": True,
+    }).eq("idinscripcion", idinscripcion).execute()
+
+    print(f"[DESCALIFICACIÓN] idinscripcion={idinscripcion} — {nombre} — motivo: {motivo}")
+
+    return {
+        "ok":            True,
+        "mensaje":       f"QR de {nombre} desactivado. Motivo: {motivo}",
+        "idinscripcion": idinscripcion,
     }
 
 
@@ -628,7 +835,6 @@ async def resultado_local(
     if c.get("estatus") == "finalizado":
         raise HTTPException(400, "Este combate ya fue finalizado")
 
-    # Validar que el ganador sea uno de los dos competidores
     if body.id_ganador not in [c.get("id_competidor_1"), c.get("id_competidor_2")]:
         raise HTTPException(400, "El ganador debe ser uno de los dos competidores del combate")
 
@@ -637,20 +843,17 @@ async def resultado_local(
         else c["id_competidor_1"]
     )
 
-    # Verificar que el torneo es modalidad local
     tor_res = db.table("torneos").select("tipo_torneo, max_combates_por_competidor")\
         .eq("idtorneo", c["idtorneo"]).execute()
-    tor = tor_res.data[0] if tor_res.data else {}
+    tor         = tor_res.data[0] if tor_res.data else {}
     tipo_torneo = tor.get("tipo_torneo", "competencia")
 
-    # Actualizar combate
     db.table("combates").update({
-        "id_ganador":   body.id_ganador,
-        "estatus":      "finalizado",
-        "tiempo_fin":   datetime.now().isoformat(),
+        "id_ganador":  body.id_ganador,
+        "estatus":     "finalizado",
+        "tiempo_fin":  datetime.now().isoformat(),
     }).eq("idcombate", idcombate).execute()
 
-    # Incrementar contador de combates realizados para ambos
     for idinsc in [body.id_ganador, perdedor_id]:
         insc_res = db.table("inscripciones_torneo").select("num_combates_realizados")\
             .eq("idinscripcion", idinsc).execute()
@@ -662,7 +865,6 @@ async def resultado_local(
 
     max_combates = tor.get("max_combates_por_competidor", 3)
 
-    # En modalidad local: si el perdedor alcanzó el límite, invalidar su QR
     perdedor_insc = db.table("inscripciones_torneo")\
         .select("num_combates_realizados")\
         .eq("idinscripcion", perdedor_id).execute()
@@ -692,7 +894,6 @@ async def asignar_podio(
 ):
     _require_roles(user, ["SuperAdmin", "Juez"])
 
-    # Verificar que el torneo es local
     tor = db.table("torneos").select("tipo_torneo, nombre")\
         .eq("idtorneo", idtorneo).execute()
     if not tor.data:
@@ -711,8 +912,8 @@ async def asignar_podio(
         actualizados.append({"idinscripcion": idinsc, "lugar": lugar})
 
     return {
-        "ok":          True,
-        "mensaje":     f"Podio asignado para {len(actualizados)} competidor(es)",
+        "ok":           True,
+        "mensaje":      f"Podio asignado para {len(actualizados)} competidor(es)",
         "actualizados": actualizados,
     }
 
@@ -733,21 +934,20 @@ async def resultados_local(
      .not_.is_("lugar_obtenido", "null")\
      .order("lugar_obtenido").execute()
 
-    # Agrupar por categoría
     por_categoria: dict = {}
     for r in res.data or []:
-        cat  = r.get("torneo_categorias") or {}
-        cid  = r.get("idcategoria", 0)
-        al   = r.get("alumnos") or {}
-        esc  = r.get("datosescuela") or {}
+        cat       = r.get("torneo_categorias") or {}
+        cid       = r.get("idcategoria", 0)
+        al        = r.get("alumnos") or {}
+        esc       = r.get("datosescuela") or {}
         nombre_cat = cat.get("nombre_categoria", f"Categoría {cid}")
         por_categoria.setdefault(nombre_cat, []).append({
-            "idinscripcion":     r["idinscripcion"],
-            "lugar":             r["lugar_obtenido"],
-            "num_combates":      r.get("num_combates_realizados", 0),
-            "nombre_alumno":     f"{al.get('nombres','')} {al.get('apellidopaterno','')}".strip(),
-            "foto":              al.get("fotoalumno"),
-            "escuela":           esc.get("nombreescuela", ""),
+            "idinscripcion": r["idinscripcion"],
+            "lugar":         r["lugar_obtenido"],
+            "num_combates":  r.get("num_combates_realizados", 0),
+            "nombre_alumno": f"{al.get('nombres','')} {al.get('apellidopaterno','')}".strip(),
+            "foto":          al.get("fotoalumno"),
+            "escuela":       esc.get("nombreescuela", ""),
         })
 
     return {
@@ -767,7 +967,7 @@ async def resultados_local(
 @router.get("/torneos/{idtorneo}/matchmaking/preview",
             summary="Vista previa de emparejamientos antes de confirmar")
 async def matchmaking_preview(
-    idtorneo:   int,
+    idtorneo:    int,
     idcategoria: Optional[int] = Query(None),
     db:   Client = Depends(get_db),
     user: dict = Depends(get_current_user),
@@ -788,7 +988,6 @@ async def matchmaking_preview(
                 advertencias.append(f"Diferencia de peso: {diff_peso:.1f} kg")
         return " | ".join(advertencias) if advertencias else None
 
-    # ── 1. Verificar si ya hay combates pendientes guardados ────
     combates_q = db.table("combates").select(
         "idcombate, idcategoria, id_competidor_1, id_competidor_2, ronda, estatus, es_bye"
     ).eq("idtorneo", idtorneo).eq("ronda", 1).eq("estatus", "pendiente")
@@ -798,7 +997,6 @@ async def matchmaking_preview(
 
     combates_guardados = combates_q.execute().data or []
 
-    # ── 2. Traer datos de inscripciones para enriquecer ─────────
     q = db.table("inscripciones_torneo").select(
         "idinscripcion, idcategoria, peso_declarado, peso_bascula, idescuela, "
         "num_combates_realizados, "
@@ -814,27 +1012,25 @@ async def matchmaking_preview(
 
     asistentes = q.execute().data or []
 
-    # Mapa idinscripcion → datos enriquecidos
     mapa_insc: dict = {}
     for i in asistentes:
-        al = i.get("alumnos") or {}
-        cg = al.get("cintasgrados") or {}
+        al  = i.get("alumnos") or {}
+        cg  = al.get("cintasgrados") or {}
         esc = i.get("datosescuela") or {}
         mapa_insc[i["idinscripcion"]] = {
-            "idinscripcion":   i["idinscripcion"],
-            "idcategoria":     i.get("idcategoria"),
-            "nombre":          f"{al.get('nombres','')} {al.get('apellidopaterno','')}".strip(),
-            "foto":            al.get("fotoalumno"),
-            "edad":            _calcular_edad(al.get("fechanacimiento", "")),
-            "peso":            i.get("peso_bascula") or i.get("peso_declarado"),
-            "cinta":           cg.get("nivelkupdan", ""),
-            "color_cinta":     cg.get("color", ""),
-            "orden_cinta":     cg.get("orden", 0),
-            "escuela":         esc.get("nombreescuela", ""),
-            "idescuela":       i.get("idescuela"),
+            "idinscripcion": i["idinscripcion"],
+            "idcategoria":   i.get("idcategoria"),
+            "nombre":        f"{al.get('nombres','')} {al.get('apellidopaterno','')}".strip(),
+            "foto":          al.get("fotoalumno"),
+            "edad":          _calcular_edad(al.get("fechanacimiento", "")),
+            "peso":          i.get("peso_bascula") or i.get("peso_declarado"),
+            "cinta":         cg.get("nivelkupdan", ""),
+            "color_cinta":   cg.get("color", ""),
+            "orden_cinta":   cg.get("orden", 0),
+            "escuela":       esc.get("nombreescuela", ""),
+            "idescuela":     i.get("idescuela"),
         }
 
-    # ── 3. Si hay combates guardados, leer de BD ─────────────────
     if combates_guardados:
         por_cat: dict = {}
         for c in combates_guardados:
@@ -843,7 +1039,7 @@ async def matchmaking_preview(
 
         resultado = []
         for cid, combates_cat in por_cat.items():
-            cat_res = db.table("torneo_categorias").select("nombre_categoria")\
+            cat_res    = db.table("torneo_categorias").select("nombre_categoria")\
                 .eq("idcategoria", cid).execute()
             nombre_cat = cat_res.data[0]["nombre_categoria"] if cat_res.data else f"Categoría {cid}"
 
@@ -872,13 +1068,12 @@ async def matchmaking_preview(
             })
 
         return {
-            "ok":        True,
-            "idtorneo":  idtorneo,
+            "ok":         True,
+            "idtorneo":   idtorneo,
             "categorias": resultado,
             "nota": "Emparejamientos guardados. Usa el endpoint de reasignar para editarlos antes de confirmar.",
         }
 
-    # ── 4. Sin combates guardados: generar dinámicamente ────────
     enriquecidos = list(mapa_insc.values())
 
     def _emparejar_preview(participantes):
@@ -888,7 +1083,7 @@ async def matchmaking_preview(
             por_escuela.setdefault(eid, []).append(p)
 
         mezclados = []
-        listas = list(por_escuela.values())
+        listas    = list(por_escuela.values())
         i = 0
         while any(listas):
             bucket = listas[i % len(listas)]
@@ -916,7 +1111,7 @@ async def matchmaking_preview(
 
     resultado = []
     for cid, participantes in por_cat_dyn.items():
-        cat_res = db.table("torneo_categorias").select("nombre_categoria")\
+        cat_res    = db.table("torneo_categorias").select("nombre_categoria")\
             .eq("idcategoria", cid).execute()
         nombre_cat = cat_res.data[0]["nombre_categoria"] if cat_res.data else f"Categoría {cid}"
         resultado.append({
@@ -927,8 +1122,8 @@ async def matchmaking_preview(
         })
 
     return {
-        "ok":        True,
-        "idtorneo":  idtorneo,
+        "ok":         True,
+        "idtorneo":   idtorneo,
         "categorias": resultado,
         "nota": "Estos son emparejamientos SUGERIDOS. Usa el endpoint de reasignar para editarlos antes de confirmar.",
     }
@@ -942,13 +1137,8 @@ async def reasignar_matchmaking(
     db:   Client = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    """
-    Intercambia las posiciones de dos competidores en el bracket antes de confirmar.
-    Busca los combates donde están asignados y los intercambia.
-    """
     _require_roles(user, ["SuperAdmin"])
 
-    # Buscar combate de A
     c_a = db.table("combates").select("idcombate, id_competidor_1, id_competidor_2")\
         .eq("idtorneo", idtorneo).eq("ronda", 1)\
         .or_(
@@ -956,7 +1146,6 @@ async def reasignar_matchmaking(
             f"id_competidor_2.eq.{body.idinscripcion_a}"
         ).execute()
 
-    # Buscar combate de B
     c_b = db.table("combates").select("idcombate, id_competidor_1, id_competidor_2")\
         .eq("idtorneo", idtorneo).eq("ronda", 1)\
         .or_(
@@ -972,8 +1161,6 @@ async def reasignar_matchmaking(
     ca = c_a.data[0]
     cb = c_b.data[0]
 
-    # Determinar en qué slot está cada uno y hacer el intercambio
-    # Competidor A → va al slot de B
     if ca["id_competidor_1"] == body.idinscripcion_a:
         db.table("combates").update({"id_competidor_1": body.idinscripcion_b})\
             .eq("idcombate", ca["idcombate"]).execute()
@@ -981,7 +1168,6 @@ async def reasignar_matchmaking(
         db.table("combates").update({"id_competidor_2": body.idinscripcion_b})\
             .eq("idcombate", ca["idcombate"]).execute()
 
-    # Competidor B → va al slot de A
     if cb["id_competidor_1"] == body.idinscripcion_b:
         db.table("combates").update({"id_competidor_1": body.idinscripcion_a})\
             .eq("idcombate", cb["idcombate"]).execute()
@@ -1006,7 +1192,6 @@ async def asignar_combate_a_area(
 ):
     _require_roles(user, ["SuperAdmin", "Staff"])
 
-    # Verificar área y combate
     area = db.table("areas_combate").select("*")\
         .eq("idarea", idarea).eq("idtorneo", idtorneo).execute()
     if not area.data:
@@ -1020,15 +1205,13 @@ async def asignar_combate_a_area(
     if combate.data[0].get("estatus") == "finalizado":
         raise HTTPException(400, "No se puede reasignar un combate ya finalizado")
 
-    # Asignar el juez del área al combate también
     juez_area = area.data[0].get("idjuez_asignado")
 
     db.table("combates").update({
-        "idarea":   idarea,
-        "id_juez":  juez_area,
+        "idarea":  idarea,
+        "id_juez": juez_area,
     }).eq("idcombate", idcombate).execute()
 
-    # Actualizar las inscripciones de los competidores con el área asignada
     c = combate.data[0]
     for idinsc in [c.get("id_competidor_1"), c.get("id_competidor_2")]:
         if idinsc:
@@ -1051,14 +1234,8 @@ async def matchmaking_confirmar(
     db:   Client = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    """
-    Genera y guarda en la tabla combates todos los enfrentamientos
-    del matchmaking preview. Si ya existen combates pendientes los elimina
-    y los regenera para que siempre se parta de un estado limpio.
-    """
     _require_roles(user, ["SuperAdmin"])
 
-    # ── 1. Verificar torneo ──────────────────────────────────
     torneo_res = db.table("torneos").select("idtorneo, tipo_torneo, estatus")\
         .eq("idtorneo", idtorneo).execute()
     if not torneo_res.data:
@@ -1067,7 +1244,6 @@ async def matchmaking_confirmar(
     if torneo["estatus"] not in (2, "en_curso", "activo"):
         raise HTTPException(400, "El torneo debe estar en curso para confirmar el matchmaking")
 
-    # ── 2. Traer asistentes pagados con check-in ─────────────
     asistentes_res = db.table("inscripciones_torneo").select(
         "idinscripcion, idcategoria, idescuela, peso_declarado, peso_bascula, "
         "alumnos(nombres, apellidopaterno)"
@@ -1080,12 +1256,10 @@ async def matchmaking_confirmar(
     if not asistentes:
         raise HTTPException(400, "No hay competidores con check-in para generar combates")
 
-    # ── 3. Verificar si ya hay combates pendientes (reasignados) ─
     combates_existentes = db.table("combates").select("idcombate")\
         .eq("idtorneo", idtorneo).eq("estatus", "pendiente").execute()
 
     if combates_existentes.data:
-        # Ya hay combates guardados (posiblemente reasignados) — solo confirmar estatus
         total_combates = len(combates_existentes.data)
         return {
             "ok":             True,
@@ -1095,20 +1269,18 @@ async def matchmaking_confirmar(
             "mensaje":        f"✅ {total_combates} combates confirmados (se respetan las reasignaciones)",
         }
 
-    # ── 4. Sin combates previos: generar desde cero ──────────
     por_cat: dict = {}
     for a in asistentes:
         cid = a.get("idcategoria") or 0
         por_cat.setdefault(cid, []).append(a)
 
-    # ── 5. Generar combates mezclando escuelas ───────────────
     def _mezclar_por_escuela(participantes):
         por_escuela: dict = {}
         for p in participantes:
             eid = p.get("idescuela", 0)
             por_escuela.setdefault(eid, []).append(p)
         mezclados = []
-        listas = list(por_escuela.values())
+        listas    = list(por_escuela.values())
         i = 0
         while any(listas):
             bucket = listas[i % len(listas)]
@@ -1128,24 +1300,26 @@ async def matchmaking_confirmar(
             b = mezclados[idx + 1] if idx + 1 < len(mezclados) else None
 
             nuevo_combate = {
-                "idtorneo":         idtorneo,
-                "idcategoria":      idcategoria if idcategoria != 0 else None,
-                "id_competidor_1":  a["idinscripcion"],
-                "id_competidor_2":  b["idinscripcion"] if b else None,
-                "ronda":            1,
-                "estatus":          "pendiente",
-                "es_bye":           b is None,
+                "idtorneo":        idtorneo,
+                "idcategoria":     idcategoria if idcategoria != 0 else None,
+                "id_competidor_1": a["idinscripcion"],
+                "id_competidor_2": b["idinscripcion"] if b else None,
+                "ronda":           1,
+                "estatus":         "pendiente",
+                "es_bye":          b is None,
             }
 
             res = db.table("combates").insert(nuevo_combate).execute()
             if res.data:
                 idcombate = res.data[0]["idcombate"]
                 combates_creados.append({
-                    "idcombate":       idcombate,
-                    "idcategoria":     idcategoria,
-                    "competidor_a":    f"{a['alumnos']['nombres']} {a['alumnos']['apellidopaterno']}".strip() if a.get("alumnos") else str(a["idinscripcion"]),
-                    "competidor_b":    f"{b['alumnos']['nombres']} {b['alumnos']['apellidopaterno']}".strip() if b and b.get("alumnos") else ("BYE" if not b else str(b["idinscripcion"])),
-                    "es_bye":          b is None,
+                    "idcombate":   idcombate,
+                    "idcategoria": idcategoria,
+                    "competidor_a": f"{a['alumnos']['nombres']} {a['alumnos']['apellidopaterno']}".strip()
+                                    if a.get("alumnos") else str(a["idinscripcion"]),
+                    "competidor_b": f"{b['alumnos']['nombres']} {b['alumnos']['apellidopaterno']}".strip()
+                                    if b and b.get("alumnos") else ("BYE" if not b else str(b["idinscripcion"])),
+                    "es_bye": b is None,
                 })
                 total_combates += 1
 
