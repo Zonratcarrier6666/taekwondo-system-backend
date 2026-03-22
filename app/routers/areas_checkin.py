@@ -892,7 +892,8 @@ async def escanear_qr(
                         .eq("idcombate", c["idcombate"]).execute()
                     combate_activo["idarea"] = idarea
                     break
-
+                
+            print(f"[DEBUG] combate_activo={combate_activo}")
     # ── 7. Armar datos del competidor para la pantalla ───────
     datos_competidor = {
         "idinscripcion":          insc["idinscripcion"],
