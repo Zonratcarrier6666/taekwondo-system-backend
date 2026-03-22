@@ -871,7 +871,7 @@ async def escanear_qr(
             "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
         ).eq("idtorneo", idtorneo_insc).eq("estatus", "pendiente")\
          .eq("idarea", idarea).execute()
-
+        print(f"[DEBUG] Resultado query combate: {c_res.data}")
         for c in c_res.data or []:
             if c.get("id_competidor_1") == idinscripcion or \
                c.get("id_competidor_2") == idinscripcion:
