@@ -873,8 +873,8 @@ async def escanear_qr(
          .eq("idarea", idarea).execute()
         print(f"[DEBUG] Resultado query combate: {c_res.data}")
         for c in c_res.data or []:
-            if c.get("id_competidor_1") == idinscripcion or \
-               c.get("id_competidor_2") == idinscripcion:
+            if int(c.get("id_competidor_1") or 0) == idinscripcion or \
+               int(c.get("id_competidor_2") or 0) == idinscripcion:
                 combate_activo = c
                 break
 
@@ -885,8 +885,8 @@ async def escanear_qr(
              .is_("idarea", "null").execute()
 
             for c in c_res2.data or []:
-                if c.get("id_competidor_1") == idinscripcion or \
-                   c.get("id_competidor_2") == idinscripcion:
+                if int(c.get("id_competidor_1") or 0) == idinscripcion or \
+                   int(c.get("id_competidor_2") or 0) == idinscripcion:
                     combate_activo = c
                     db.table("combates").update({"idarea": idarea})\
                         .eq("idcombate", c["idcombate"]).execute()
