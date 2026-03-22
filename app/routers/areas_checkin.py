@@ -863,6 +863,9 @@ async def escanear_qr(
     if idarea:
         idinscripcion = insc["idinscripcion"]
         idtorneo_insc = insc["idtorneo"]
+        
+        print(f"[DEBUG] Buscando combate: idinscripcion={idinscripcion}, idtorneo={idtorneo_insc}, idarea={idarea}")
+
 
         c_res = db.table("combates").select(
             "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
