@@ -210,7 +210,201 @@ async def eliminar_area(
     db.table("areas_combate").delete().eq("idarea", idarea).execute()
     return {"ok": True, "mensaje": "Área eliminada"}
 
-
+# ─────────────────────────────────────────────────────────────
+#  LISTAR ESCUELAS PARTICIPANTES EN EL TORNEO
+# ─────────────────────────────────────────────────────────────
+ 
+@router.get(
+    "/torneos/{idtorneo}/checkin/escuelas",
+    summary="Escuelas participantes con conteo de inscritos y check-in",
+)
+async def listar_escuelas_torneo(
+    idtorneo: int,
+    db:   Client = Depends(get_db),
+    user: dict   = Depends(get_current_user),
+):
+    """
+    Devuelve la lista de escuelas que tienen al menos un inscrito
+    pagado en el torneo, junto con:
+      - total_inscritos  : cuántos alumnos pagados tiene esa escuela
+      - con_checkin      : cuántos ya tienen check-in
+      - pendientes       : cuántos aún les falta check-in
+    Útil para la ventanilla del staff: el profe llega, buscas su
+    escuela y ves el resumen antes de abrir el flujo.
+    """
+    _require_roles(user, ["SuperAdmin", "Staff", "Escuela", "Profesor"])
+ 
+    res = db.table("inscripciones_torneo").select(
+        "idescuela, estatus_pago, estatus_checkin, "
+        "datosescuela!inscripciones_torneo_idescuela_fkey(idescuela, nombreescuela)"
+    ).eq("idtorneo", idtorneo).execute()
+ 
+    inscritos = res.data or []
+ 
+    # Agrupa por escuela (solo pagados)
+    escuelas: dict[int, dict] = {}
+    for i in inscritos:
+        if str(i.get("estatus_pago", "")).lower() != "pagado":
+            continue
+        esc_raw  = i.get("datosescuela") or {}
+        idesc    = i.get("idescuela")
+        if not idesc:
+            continue
+        if idesc not in escuelas:
+            escuelas[idesc] = {
+                "idescuela":       idesc,
+                "nombreescuela":   esc_raw.get("nombreescuela", f"Escuela {idesc}"),
+                "total_inscritos": 0,
+                "con_checkin":     0,
+                "pendientes":      0,
+            }
+        escuelas[idesc]["total_inscritos"] += 1
+        if i.get("estatus_checkin"):
+            escuelas[idesc]["con_checkin"] += 1
+        else:
+            escuelas[idesc]["pendientes"] += 1
+ 
+    lista = sorted(escuelas.values(), key=lambda x: x["nombreescuela"])
+    return {
+        "ok":      True,
+        "total":   len(lista),
+        "escuelas": lista,
+    }
+ 
+ 
+# ─────────────────────────────────────────────────────────────
+#  PDF EN LOTE — todos los gafetes de una escuela en 1 PDF
+# ─────────────────────────────────────────────────────────────
+ 
+@router.get(
+    "/torneos/{idtorneo}/checkin/gafetes-escuela",
+    summary="PDF con todos los gafetes de una escuela (check-in en lote si hace falta)",
+)
+async def gafetes_escuela_pdf(
+    idtorneo:        int,
+    idescuela:       int  = Query(..., description="ID de la escuela"),
+    hacer_checkin:   bool = Query(False, description="Si true, hace check-in automático a los que no lo tienen"),
+    db:   Client = Depends(get_db),
+    user: dict   = Depends(get_current_user),
+):
+    """
+    Flujo ventanilla:
+      1. Llega el profe con sus alumnos.
+      2. Staff llama a este endpoint con hacer_checkin=true.
+      3. A los que aún no tienen check-in se les genera token_qr
+         automáticamente (sin peso_bascula — queda como None).
+      4. Se devuelve un PDF multipágina: una página = un gafete.
+ 
+    Si hacer_checkin=false (default) solo incluye los que ya
+    tienen check-in y token_qr válido.
+    """
+    _require_roles(user, ["SuperAdmin", "Staff", "Escuela"])
+ 
+    # 1. Traer todos los inscritos PAGADOS de esa escuela
+    res = db.table("inscripciones_torneo").select(
+        "idinscripcion, idalumno, idescuela, estatus_pago, "
+        "estatus_checkin, token_qr, peso_bascula, peso_declarado, "
+        "alumnos(nombres, apellidopaterno, fechanacimiento, "
+        "  cintasgrados(nivelkupdan, color)), "
+        "torneo_categorias(nombre_categoria), "
+        "torneos(nombre, fecha, hora_inicio, sede, ciudad), "
+        "datosescuela!inscripciones_torneo_idescuela_fkey(nombreescuela)"
+    ).eq("idtorneo", idtorneo)\
+     .eq("idescuela", idescuela)\
+     .eq("estatus_pago", "Pagado")\
+     .execute()
+ 
+    inscritos = res.data or []
+    if not inscritos:
+        raise HTTPException(
+            404,
+            "No se encontraron inscritos pagados de esa escuela en este torneo."
+        )
+ 
+    # 2. Si hacer_checkin=true, procesar los que aún no tienen check-in
+    if hacer_checkin:
+        for insc in inscritos:
+            if not insc.get("estatus_checkin"):
+                token = str(uuid.uuid4())
+                db.table("inscripciones_torneo").update({
+                    "estatus_checkin": True,
+                    "token_qr":        token,
+                    "hora_llegada":    datetime.now().isoformat(),
+                    "asistio":         True,
+                    "qr_usado":        False,
+                }).eq("idinscripcion", insc["idinscripcion"]).execute()
+                # actualizar en memoria para el PDF
+                insc["estatus_checkin"] = True
+                insc["token_qr"]        = token
+ 
+    # 3. Filtrar solo los que tienen token_qr (con check-in)
+    con_qr = [i for i in inscritos if i.get("token_qr") and i.get("estatus_checkin")]
+ 
+    if not con_qr:
+        raise HTTPException(
+            400,
+            "Ningún competidor de esta escuela tiene check-in aún. "
+            "Usa hacer_checkin=true para generarlos en este momento, "
+            "o realiza el check-in individual primero."
+        )
+ 
+    # 4. Generar PDF multipágina usando pypdf (merge de PDFs individuales)
+    try:
+        from pypdf import PdfWriter
+        writer = PdfWriter()
+ 
+        tor = (con_qr[0].get("torneos") or {})
+ 
+        for insc in con_qr:
+            al    = insc.get("alumnos") or {}
+            cg    = al.get("cintasgrados") or {}
+            nombre_alumno = f"{al.get('nombres', '')} {al.get('apellidopaterno', '')}".strip()
+            cinta         = cg.get("nivelkupdan", "Sin especificar")
+            edad          = _calcular_edad(al.get("fechanacimiento", ""))
+            peso          = insc.get("peso_bascula") or insc.get("peso_declarado")
+ 
+            pdf_bytes = generar_pdf_qr(
+                token         = insc["token_qr"],
+                nombre_alumno = nombre_alumno,
+                nombre_torneo = tor.get("nombre", "Torneo"),
+                fecha_torneo  = str(tor.get("fecha", "")),
+                hora_torneo   = tor.get("hora_inicio", "09:00"),
+                sede_torneo   = tor.get("sede", ""),
+                ciudad_torneo = tor.get("ciudad", ""),
+                cinta         = cinta,
+                edad          = edad,
+                peso          = float(peso) if peso else None,
+            )
+ 
+            # Agregar las páginas de este gafete al writer
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            for page in reader.pages:
+                writer.add_page(page)
+ 
+        # Serializar PDF final
+        output = io.BytesIO()
+        writer.write(output)
+        pdf_final = output.getvalue()
+ 
+    except ImportError:
+        raise HTTPException(
+            500,
+            "Falta instalar pypdf: pip install pypdf"
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Error generando PDF multipágina: {e}")
+ 
+    # 5. Nombre del archivo
+    esc_nombre = (con_qr[0].get("datosescuela") or {}).get("nombreescuela", f"Escuela_{idescuela}")
+    filename   = f"Gafetes_{esc_nombre.replace(' ', '_')}_{idtorneo}.pdf"
+ 
+    return Response(
+        content    = pdf_final,
+        media_type = "application/pdf",
+        headers    = {"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+    
 # ═════════════════════════════════════════════════════════════
 #  CHECK-IN (día del torneo)
 # ═════════════════════════════════════════════════════════════
@@ -1331,197 +1525,3 @@ async def matchmaking_confirmar(
         "combates":       combates_creados,
         "mensaje":        f"✅ {total_combates} combates generados y guardados correctamente",
     }
-# ─────────────────────────────────────────────────────────────
-#  LISTAR ESCUELAS PARTICIPANTES EN EL TORNEO
-# ─────────────────────────────────────────────────────────────
- 
-@router.get(
-    "/torneos/{idtorneo}/checkin/escuelas",
-    summary="Escuelas participantes con conteo de inscritos y check-in",
-)
-async def listar_escuelas_torneo(
-    idtorneo: int,
-    db:   Client = Depends(get_db),
-    user: dict   = Depends(get_current_user),
-):
-    """
-    Devuelve la lista de escuelas que tienen al menos un inscrito
-    pagado en el torneo, junto con:
-      - total_inscritos  : cuántos alumnos pagados tiene esa escuela
-      - con_checkin      : cuántos ya tienen check-in
-      - pendientes       : cuántos aún les falta check-in
-    Útil para la ventanilla del staff: el profe llega, buscas su
-    escuela y ves el resumen antes de abrir el flujo.
-    """
-    _require_roles(user, ["SuperAdmin", "Staff", "Escuela", "Profesor"])
- 
-    res = db.table("inscripciones_torneo").select(
-        "idescuela, estatus_pago, estatus_checkin, "
-        "datosescuela!inscripciones_torneo_idescuela_fkey(idescuela, nombreescuela)"
-    ).eq("idtorneo", idtorneo).execute()
- 
-    inscritos = res.data or []
- 
-    # Agrupa por escuela (solo pagados)
-    escuelas: dict[int, dict] = {}
-    for i in inscritos:
-        if str(i.get("estatus_pago", "")).lower() != "pagado":
-            continue
-        esc_raw  = i.get("datosescuela") or {}
-        idesc    = i.get("idescuela")
-        if not idesc:
-            continue
-        if idesc not in escuelas:
-            escuelas[idesc] = {
-                "idescuela":       idesc,
-                "nombreescuela":   esc_raw.get("nombreescuela", f"Escuela {idesc}"),
-                "total_inscritos": 0,
-                "con_checkin":     0,
-                "pendientes":      0,
-            }
-        escuelas[idesc]["total_inscritos"] += 1
-        if i.get("estatus_checkin"):
-            escuelas[idesc]["con_checkin"] += 1
-        else:
-            escuelas[idesc]["pendientes"] += 1
- 
-    lista = sorted(escuelas.values(), key=lambda x: x["nombreescuela"])
-    return {
-        "ok":      True,
-        "total":   len(lista),
-        "escuelas": lista,
-    }
- 
- 
-# ─────────────────────────────────────────────────────────────
-#  PDF EN LOTE — todos los gafetes de una escuela en 1 PDF
-# ─────────────────────────────────────────────────────────────
- 
-@router.get(
-    "/torneos/{idtorneo}/checkin/gafetes-escuela",
-    summary="PDF con todos los gafetes de una escuela (check-in en lote si hace falta)",
-)
-async def gafetes_escuela_pdf(
-    idtorneo:        int,
-    idescuela:       int  = Query(..., description="ID de la escuela"),
-    hacer_checkin:   bool = Query(False, description="Si true, hace check-in automático a los que no lo tienen"),
-    db:   Client = Depends(get_db),
-    user: dict   = Depends(get_current_user),
-):
-    """
-    Flujo ventanilla:
-      1. Llega el profe con sus alumnos.
-      2. Staff llama a este endpoint con hacer_checkin=true.
-      3. A los que aún no tienen check-in se les genera token_qr
-         automáticamente (sin peso_bascula — queda como None).
-      4. Se devuelve un PDF multipágina: una página = un gafete.
- 
-    Si hacer_checkin=false (default) solo incluye los que ya
-    tienen check-in y token_qr válido.
-    """
-    _require_roles(user, ["SuperAdmin", "Staff", "Escuela"])
- 
-    # 1. Traer todos los inscritos PAGADOS de esa escuela
-    res = db.table("inscripciones_torneo").select(
-        "idinscripcion, idalumno, idescuela, estatus_pago, "
-        "estatus_checkin, token_qr, peso_bascula, peso_declarado, "
-        "alumnos(nombres, apellidopaterno, fechanacimiento, "
-        "  cintasgrados(nivelkupdan, color)), "
-        "torneo_categorias(nombre_categoria), "
-        "torneos(nombre, fecha, hora_inicio, sede, ciudad), "
-        "datosescuela!inscripciones_torneo_idescuela_fkey(nombreescuela)"
-    ).eq("idtorneo", idtorneo)\
-     .eq("idescuela", idescuela)\
-     .eq("estatus_pago", "Pagado")\
-     .execute()
- 
-    inscritos = res.data or []
-    if not inscritos:
-        raise HTTPException(
-            404,
-            "No se encontraron inscritos pagados de esa escuela en este torneo."
-        )
- 
-    # 2. Si hacer_checkin=true, procesar los que aún no tienen check-in
-    if hacer_checkin:
-        for insc in inscritos:
-            if not insc.get("estatus_checkin"):
-                token = str(uuid.uuid4())
-                db.table("inscripciones_torneo").update({
-                    "estatus_checkin": True,
-                    "token_qr":        token,
-                    "hora_llegada":    datetime.now().isoformat(),
-                    "asistio":         True,
-                    "qr_usado":        False,
-                }).eq("idinscripcion", insc["idinscripcion"]).execute()
-                # actualizar en memoria para el PDF
-                insc["estatus_checkin"] = True
-                insc["token_qr"]        = token
- 
-    # 3. Filtrar solo los que tienen token_qr (con check-in)
-    con_qr = [i for i in inscritos if i.get("token_qr") and i.get("estatus_checkin")]
- 
-    if not con_qr:
-        raise HTTPException(
-            400,
-            "Ningún competidor de esta escuela tiene check-in aún. "
-            "Usa hacer_checkin=true para generarlos en este momento, "
-            "o realiza el check-in individual primero."
-        )
- 
-    # 4. Generar PDF multipágina usando pypdf (merge de PDFs individuales)
-    try:
-        from pypdf import PdfWriter
-        writer = PdfWriter()
- 
-        tor = (con_qr[0].get("torneos") or {})
- 
-        for insc in con_qr:
-            al    = insc.get("alumnos") or {}
-            cg    = al.get("cintasgrados") or {}
-            nombre_alumno = f"{al.get('nombres', '')} {al.get('apellidopaterno', '')}".strip()
-            cinta         = cg.get("nivelkupdan", "Sin especificar")
-            edad          = _calcular_edad(al.get("fechanacimiento", ""))
-            peso          = insc.get("peso_bascula") or insc.get("peso_declarado")
- 
-            pdf_bytes = generar_pdf_qr(
-                token         = insc["token_qr"],
-                nombre_alumno = nombre_alumno,
-                nombre_torneo = tor.get("nombre", "Torneo"),
-                fecha_torneo  = str(tor.get("fecha", "")),
-                hora_torneo   = tor.get("hora_inicio", "09:00"),
-                sede_torneo   = tor.get("sede", ""),
-                ciudad_torneo = tor.get("ciudad", ""),
-                cinta         = cinta,
-                edad          = edad,
-                peso          = float(peso) if peso else None,
-            )
- 
-            # Agregar las páginas de este gafete al writer
-            from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(pdf_bytes))
-            for page in reader.pages:
-                writer.add_page(page)
- 
-        # Serializar PDF final
-        output = io.BytesIO()
-        writer.write(output)
-        pdf_final = output.getvalue()
- 
-    except ImportError:
-        raise HTTPException(
-            500,
-            "Falta instalar pypdf: pip install pypdf"
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Error generando PDF multipágina: {e}")
- 
-    # 5. Nombre del archivo
-    esc_nombre = (con_qr[0].get("datosescuela") or {}).get("nombreescuela", f"Escuela_{idescuela}")
-    filename   = f"Gafetes_{esc_nombre.replace(' ', '_')}_{idtorneo}.pdf"
- 
-    return Response(
-        content    = pdf_final,
-        media_type = "application/pdf",
-        headers    = {"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
