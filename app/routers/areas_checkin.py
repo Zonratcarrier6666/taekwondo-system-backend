@@ -426,7 +426,7 @@ async def checkin_pendientes(
         "  fechanacimiento, cintasgrados(nivelkupdan, color)), "
         "datosescuela!inscripciones_torneo_idescuela_fkey(nombreescuela), "
         "torneo_categorias(nombre_categoria)"
-    ).eq("idtorneo", idtorneo).eq("estatus_pago", "Pagado")
+    ).eq("idtorneo", idtorneo).eq("estatus_pago", "pagado")
 
     if idescuela:
         q = q.eq("idescuela", idescuela)
@@ -537,9 +537,9 @@ async def lista_completa_checkin(
         })
 
     total           = len(resultado)
-    pagados         = sum(1 for r in resultado if r["estatus_pago"] == "Pagado")
+    pagados         = sum(1 for r in resultado if r["estatus_pago"] == "pagado")
     con_checkin     = sum(1 for r in resultado if r["estatus_checkin"])
-    pendientes_pago = sum(1 for r in resultado if r["estatus_pago"] != "Pagado")
+    pendientes_pago = sum(1 for r in resultado if r["estatus_pago"] != "pagado")
 
     return {
         "ok":              True,
@@ -548,6 +548,60 @@ async def lista_completa_checkin(
         "con_checkin":     con_checkin,
         "pendientes_pago": pendientes_pago,
         "inscritos":       resultado,
+    }
+
+@router.post("/torneos/{idtorneo}/checkin/lote",
+             summary="Check-in en lote (varios competidores de la misma escuela)")
+async def checkin_lote(
+    idtorneo: int,
+    body: CheckinLote,
+    db:   Client = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    _require_roles(user, ["SuperAdmin", "Staff", "Escuela"])
+
+    resultados = []
+    for idinsc in body.idinscripciones:
+        try:
+            insc_res = db.table("inscripciones_torneo").select("*")\
+                .eq("idinscripcion", idinsc).eq("idtorneo", idtorneo).execute()
+            if not insc_res.data:
+                resultados.append({"idinscripcion": idinsc, "ok": False, "error": "No encontrado"})
+                continue
+
+            insc = insc_res.data[0]
+            if insc.get("estatus_pago") != "pagado":
+                resultados.append({"idinscripcion": idinsc, "ok": False, "error": "Sin pago confirmado"})
+                continue
+
+            if insc.get("estatus_checkin"):
+                resultados.append({
+                    "idinscripcion": idinsc, "ok": True,
+                    "token_qr": insc.get("token_qr"), "ya_existia": True
+                })
+                continue
+
+            token = str(uuid.uuid4())
+            db.table("inscripciones_torneo").update({
+                "estatus_checkin": True,
+                "token_qr":        token,
+                "hora_llegada":    datetime.now().isoformat(),
+                "asistio":         True,
+                "qr_usado":        False,
+            }).eq("idinscripcion", idinsc).execute()
+
+            resultados.append({"idinscripcion": idinsc, "ok": True, "token_qr": token, "ya_existia": False})
+
+        except Exception as e:
+            resultados.append({"idinscripcion": idinsc, "ok": False, "error": str(e)})
+
+    exitosos = [r for r in resultados if r["ok"]]
+    return {
+        "ok":       True,
+        "total":    len(body.idinscripciones),
+        "exitosos": len(exitosos),
+        "fallidos": len(resultados) - len(exitosos),
+        "detalle":  resultados,
     }
 
 
@@ -574,7 +628,7 @@ async def hacer_checkin(
 
     insc = insc_res.data[0]
 
-    if insc.get("estatus_pago") != "Pagado":
+    if insc.get("estatus_pago") != "pagado":
         raise HTTPException(400,
             f"El competidor no tiene pago confirmado (estatus: {insc.get('estatus_pago')}). "
             "Confirma el pago en Caja antes del check-in.")
@@ -612,59 +666,6 @@ async def hacer_checkin(
     }
 
 
-@router.post("/torneos/{idtorneo}/checkin/lote",
-             summary="Check-in en lote (varios competidores de la misma escuela)")
-async def checkin_lote(
-    idtorneo: int,
-    body: CheckinLote,
-    db:   Client = Depends(get_db),
-    user: dict = Depends(get_current_user),
-):
-    _require_roles(user, ["SuperAdmin", "Staff", "Escuela"])
-
-    resultados = []
-    for idinsc in body.idinscripciones:
-        try:
-            insc_res = db.table("inscripciones_torneo").select("*")\
-                .eq("idinscripcion", idinsc).eq("idtorneo", idtorneo).execute()
-            if not insc_res.data:
-                resultados.append({"idinscripcion": idinsc, "ok": False, "error": "No encontrado"})
-                continue
-
-            insc = insc_res.data[0]
-            if insc.get("estatus_pago") != "Pagado":
-                resultados.append({"idinscripcion": idinsc, "ok": False, "error": "Sin pago confirmado"})
-                continue
-
-            if insc.get("estatus_checkin"):
-                resultados.append({
-                    "idinscripcion": idinsc, "ok": True,
-                    "token_qr": insc.get("token_qr"), "ya_existia": True
-                })
-                continue
-
-            token = str(uuid.uuid4())
-            db.table("inscripciones_torneo").update({
-                "estatus_checkin": True,
-                "token_qr":        token,
-                "hora_llegada":    datetime.now().isoformat(),
-                "asistio":         True,
-                "qr_usado":        False,
-            }).eq("idinscripcion", idinsc).execute()
-
-            resultados.append({"idinscripcion": idinsc, "ok": True, "token_qr": token, "ya_existia": False})
-
-        except Exception as e:
-            resultados.append({"idinscripcion": idinsc, "ok": False, "error": str(e)})
-
-    exitosos = [r for r in resultados if r["ok"]]
-    return {
-        "ok":       True,
-        "total":    len(body.idinscripciones),
-        "exitosos": len(exitosos),
-        "fallidos": len(resultados) - len(exitosos),
-        "detalle":  resultados,
-    }
 
 
 @router.get("/torneos/{idtorneo}/checkin/{idinscripcion}/gafete-pdf",
