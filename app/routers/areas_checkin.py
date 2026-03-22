@@ -311,7 +311,7 @@ async def gafetes_escuela_pdf(
         "datosescuela!inscripciones_torneo_idescuela_fkey(nombreescuela)"
     ).eq("idtorneo", idtorneo)\
      .eq("idescuela", idescuela)\
-     .eq("estatus_pago", "Pagado")\
+     .eq("estatus_pago", "pagado")\
      .execute()
  
     inscritos = res.data or []

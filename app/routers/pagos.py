@@ -1,5 +1,8 @@
 # ============================================================
-#  app/routers/pagos.py
+#  app/routers/pagos.py  — v2
+#  CAMBIO: Al confirmar pago de torneo ya NO se genera QR.
+#  Solo actualiza estatus_pago = "Pagado" y manda correo con
+#  datos del torneo. El QR se genera en check-in presencial.
 # ============================================================
 
 import os
@@ -13,8 +16,8 @@ from supabase import Client
 from app.utils.database   import get_db
 from app.utils.auth_utils import get_current_user
 from app.utils.qr_generator import (
-    generar_token_qr, generar_pdf_qr,
-    enviar_qr_por_correo, enviar_confirmacion_cobro,   # ← nuevo
+    enviar_confirmacion_cobro,
+    enviar_confirmacion_pago_torneo,
 )
 from app.schemas.pagos import (
     TipoPago, EstatusPago, CicloSemestral,
@@ -50,23 +53,15 @@ _PRECIOS_DEFAULT = {
 }
 
 def _get_precios(idescuela: int, db: Client) -> dict:
-    """
-    Lee los precios configurados por la escuela desde config_json.
-    Si no tienen config, devuelve los defaults.
-    Siempre retorna todos los campos garantizados.
-    """
-    res = db.table("datosescuela").select("config_json")            .eq("idescuela", idescuela).execute()
+    res = db.table("datosescuela").select("config_json")\
+        .eq("idescuela", idescuela).execute()
     if not res.data:
         return _PRECIOS_DEFAULT.copy()
     config  = res.data[0].get("config_json") or {}
     precios = config.get("precios", {})
-    # Retrocompatibilidad: asegurar todos los campos
     result  = _PRECIOS_DEFAULT.copy()
-    result.update({k: v for k, v in precios.items()
-                   if k in _PRECIOS_DEFAULT})
+    result.update({k: v for k, v in precios.items() if k in _PRECIOS_DEFAULT})
     return result
-
-
 
 
 # ─────────────────────────────────────────────────────────────
@@ -105,13 +100,12 @@ def _get_escuela(idescuela: int, db: Client) -> dict:
     return r.data[0]
 
 def _cfg_alumno(idalumno: int, idescuela: int, db: Client) -> dict:
-    """Lee config individual del alumno desde datosescuela.config_json."""
     esc = _get_escuela(idescuela, db)
     return (esc.get("config_json") or {}).get(f"pago_alumno_{idalumno}", {})
 
 def _save_cfg_alumno(idalumno: int, idescuela: int, cfg: dict, db: Client):
-    esc    = _get_escuela(idescuela, db)
-    cjson  = esc.get("config_json") or {}
+    esc   = _get_escuela(idescuela, db)
+    cjson = esc.get("config_json") or {}
     cjson[f"pago_alumno_{idalumno}"] = cfg
     db.table("datosescuela").update({"config_json": cjson}).eq("idescuela", idescuela).execute()
 
@@ -129,39 +123,22 @@ def _ya_inscripcion(idalumno: int, ciclo: str, year: int, db: Client) -> bool:
 def _link_form(idalumno: int, idpago: int) -> str:
     return f"{APP_URL}/formulario/{idalumno}/{idpago}"
 
-def _require_staff(user: dict):
-    """Verifica que el usuario tenga permisos administrativos."""
-    if user.get("rol") not in ROLES_STAFF:
-        raise HTTPException(403, "Sin acceso")
-
 def _calcular_edad(fecha_nac: str) -> int:
-    """
-    Calcula la edad actual a partir de una fecha de nacimiento.
-    Útil para la credencial del torneo.
-    """
     try:
-        # Extraemos solo YYYY-MM-DD en caso de que venga con timestamp
-        fn = date.fromisoformat(str(fecha_nac)[:10])
+        fn  = date.fromisoformat(str(fecha_nac)[:10])
         hoy = date.today()
-        # Restamos años y ajustamos si aún no cumple años en el año actual
         return hoy.year - fn.year - ((hoy.month, hoy.day) < (fn.month, fn.day))
     except Exception:
         return 0
 
-
-
 def _calcular_recargo(pago: dict, recargo_semanal: float) -> float:
-    """
-    Calcula el recargo acumulado de un pago pendiente según las semanas de atraso.
-    Replica la misma lógica que calcAtraso() en el frontend.
-    """
     try:
         fecha_venc_raw = pago.get("fecha_pago")
         if not fecha_venc_raw:
             return 0.0
-        fv  = date.fromisoformat(str(fecha_venc_raw)[:10])
-        hoy = date.today()
-        dias_corridos = max(0, (hoy - fv).days)
+        fv             = date.fromisoformat(str(fecha_venc_raw)[:10])
+        hoy            = date.today()
+        dias_corridos  = max(0, (hoy - fv).days)
         semanas_atraso = dias_corridos // 7
         return round(semanas_atraso * recargo_semanal, 2)
     except Exception:
@@ -239,16 +216,15 @@ async def crear_mensualidad(
     if _ya_mensualidad(body.idalumno, body.mes_correspondiente, db):
         raise HTTPException(409, f"Ya existe mensualidad {body.mes_correspondiente}")
 
-    cfg       = _cfg_alumno(body.idalumno, alumno["idescuela"], db)
-    precios   = _get_precios(alumno["idescuela"], db)
-    dia_cobro = cfg.get("dia_cobro", 1)
-    # Usar monto del body si se envía explícito, si no usar el precio configurado
+    cfg         = _cfg_alumno(body.idalumno, alumno["idescuela"], db)
+    precios     = _get_precios(alumno["idescuela"], db)
+    dia_cobro   = cfg.get("dia_cobro", 1)
     monto_final = body.monto if body.monto else cfg.get("monto_mensualidad", precios["mensualidad_default"])
     try:
-        y, m      = map(int, body.mes_correspondiente.split("-"))
-        f_cobro   = str(date(y, m, min(dia_cobro, 28)))
+        y, m    = map(int, body.mes_correspondiente.split("-"))
+        f_cobro = str(date(y, m, min(dia_cobro, 28)))
     except Exception:
-        f_cobro   = str(date.today())
+        f_cobro = str(date.today())
 
     pago = {
         "idalumno":     body.idalumno,
@@ -261,11 +237,10 @@ async def crear_mensualidad(
         "fecha_pago":   f_cobro,
         "notas_adicionales": body.notas_adicionales,
         "desglose_interno": {
-            "tipo": "mensualidad",
-            "mes":  body.mes_correspondiente,
-            "dia_cobro": dia_cobro,
-            # Snapshot del precio vigente al momento de generar el cargo
-            "precio_vigente":        monto_final,
+            "tipo":                    "mensualidad",
+            "mes":                     body.mes_correspondiente,
+            "dia_cobro":               dia_cobro,
+            "precio_vigente":          monto_final,
             "recargo_semanal_vigente": precios["recargo_semanal"],
             "dias_gracia_vigente":     precios["dias_gracia"],
             "precio_tomado_en":        str(date.today()),
@@ -309,14 +284,13 @@ async def mensualidades_masivo(
                 "estatus":      int(EstatusPago.PENDIENTE),
                 "fecha_pago":   f_cobro,
                 "desglose_interno": {
-                    "tipo": "mensualidad",
-                    "mes":  body.mes_correspondiente,
-                    "dia_cobro": dia_cobro,
-                    # Snapshot del precio vigente
+                    "tipo":                    "mensualidad",
+                    "mes":                     body.mes_correspondiente,
+                    "dia_cobro":               dia_cobro,
                     "precio_vigente":          monto,
-                    "recargo_semanal_vigente":  precios["recargo_semanal"],
-                    "dias_gracia_vigente":      precios["dias_gracia"],
-                    "precio_tomado_en":         str(date.today()),
+                    "recargo_semanal_vigente": precios["recargo_semanal"],
+                    "dias_gracia_vigente":     precios["dias_gracia"],
+                    "precio_tomado_en":        str(date.today()),
                 },
             }).execute()
             generados.append(aid)
@@ -324,8 +298,11 @@ async def mensualidades_masivo(
             errores.append({"idalumno": aid, "error": str(e)})
 
     return {
-        "ok": True, "mes": body.mes_correspondiente,
-        "generados": len(generados), "omitidos": len(omitidos), "errores": errores,
+        "ok":      True,
+        "mes":     body.mes_correspondiente,
+        "generados": len(generados),
+        "omitidos":  len(omitidos),
+        "errores":   errores,
     }
 
 
@@ -348,8 +325,7 @@ async def crear_inscripcion(
     if not alumno_debe_inscripcion(fecha_reg):
         raise HTTPException(400,
             "El alumno se registró en el ciclo actual. "
-            "La inscripción se cobra al inicio del siguiente ciclo."
-        )
+            "La inscripción se cobra al inicio del siguiente ciclo.")
     if _ya_inscripcion(body.idalumno, body.ciclo.value, body.year, db):
         raise HTTPException(409, f"Ya existe inscripción {body.ciclo.value} {body.year}")
 
@@ -370,9 +346,8 @@ async def crear_inscripcion(
             "year":              body.year,
             "formulario_status": "PENDIENTE",
             "firma_url":         None,
-            # Snapshot precio vigente
-            "precio_vigente":   monto_insc,
-            "precio_tomado_en": str(date.today()),
+            "precio_vigente":    monto_insc,
+            "precio_tomado_en":  str(date.today()),
         },
     }
     r = db.table("pagos").insert(pago).execute()
@@ -420,11 +395,13 @@ async def inscripciones_masivo(
             errores.append({"idalumno": aid, "error": str(e)})
 
     return {
-        "ok": True, "ciclo": body.ciclo.value, "year": body.year,
-        "generados":         len(generados),
+        "ok":                 True,
+        "ciclo":              body.ciclo.value,
+        "year":               body.year,
+        "generados":          len(generados),
         "omitidos_ciclo_reg": len(omit_ciclo),
         "omitidos_existente": len(omit_exist),
-        "errores":           errores,
+        "errores":            errores,
     }
 
 
@@ -446,14 +423,12 @@ async def cobrar_pago(
     - Cualquier otro tipo: envía confirmación de cobro al tutor.
     """
     _require_staff(user)
- 
-    # 1. Obtener datos del pago
+
     p_res = db.table("pagos").select("*").eq("idpago", body.idpago).execute()
     if not p_res.data:
         raise HTTPException(404, "No se encontró el registro de pago")
     pago = p_res.data[0]
- 
-    # 2. Marcar como PAGADO
+
     db.table("pagos").update({
         "estatus":           int(EstatusPago.PAGADO),
         "metodo_pago":       body.metodo_pago.value,
@@ -461,47 +436,41 @@ async def cobrar_pago(
         "url_comprobante":   body.url_comprobante,
         "notas_adicionales": body.notas,
     }).eq("idpago", body.idpago).execute()
- 
-    # 3. Datos compartidos: alumno y escuela
+
     al_res  = db.table("alumnos").select("*")\
                 .eq("idalumno", pago["idalumno"]).execute()
     esc_res = db.table("datosescuela").select("nombreescuela")\
                 .eq("idescuela", pago.get("idescuela", 0)).execute()
- 
+
     correo_tutor   = None
     nombre_alumno  = "Alumno"
     nombre_escuela = "Dragon Negro Dojo"
- 
+
     if al_res.data:
         al            = al_res.data[0]
         correo_tutor  = al.get("correotutor")
         nombre_alumno = f"{al['nombres']} {al['apellidopaterno']}"
     if esc_res.data:
         nombre_escuela = esc_res.data[0].get("nombreescuela", nombre_escuela)
- 
-    # ──────────────────────────────────────────────────────────
-    # 4a. TORNEO → Solo actualizar estatus_pago + correo de datos
-    #     (SIN generar token_qr — eso ocurre en check-in)
-    # ──────────────────────────────────────────────────────────
+
+    # ── TORNEO: solo actualizar estatus + correo sin QR ─────
     if pago.get("id_tipo_pago") == int(TipoPago.TORNEO):
         desglose      = pago.get("desglose_interno") or {}
         idinscripcion = desglose.get("idinscripcion")
         idtorneo      = desglose.get("idtorneo")
- 
+
         if idinscripcion:
-            # Solo marcar como Pagado — token_qr queda NULL hasta check-in
             db.table("inscripciones_torneo").update({
                 "estatus_pago": "Pagado",
                 "idpago":       body.idpago,
             }).eq("idinscripcion", idinscripcion).execute()
- 
-        # Enviar correo de confirmación con datos del torneo (sin QR)
+
         if idtorneo and correo_tutor:
             try:
                 t_res = db.table("torneos").select(
                     "nombre, fecha, hora_inicio, sede, ciudad, descripcion"
                 ).eq("idtorneo", idtorneo).execute()
- 
+
                 if t_res.data:
                     torneo = t_res.data[0]
                     enviar_confirmacion_pago_torneo(
@@ -519,12 +488,9 @@ async def cobrar_pago(
                         nombre_escuela = nombre_escuela,
                     )
             except Exception as e:
-                # El cobro ya quedó guardado — no revertir por error de email
                 print(f"[ERROR EMAIL TORNEO] idpago={body.idpago}: {e}")
- 
-    # ──────────────────────────────────────────────────────────
-    # 4b. MENSUALIDAD / INSCRIPCIÓN / EXAMEN / OTRO
-    # ──────────────────────────────────────────────────────────
+
+    # ── OTROS TIPOS: confirmación de cobro normal ────────────
     else:
         if correo_tutor:
             try:
@@ -541,11 +507,12 @@ async def cobrar_pago(
                 print(f"[ERROR EMAIL COBRO] idpago={body.idpago}: {e}")
         else:
             print(f"[COBRO] idpago={body.idpago} — alumno sin correotutor, no se envió email")
- 
+
     return {
-        "ok":     True,
+        "ok":      True,
         "mensaje": "Cobro registrado. Se notificó al tutor con los datos del torneo.",
     }
+
 
 @router.post("/cobrar/lote")
 async def cobrar_lote(
@@ -556,9 +523,9 @@ async def cobrar_lote(
     _require_staff(user)
     for idpago in body.idpagos:
         db.table("pagos").update({
-            "estatus":     int(EstatusPago.PAGADO),
-            "metodo_pago": body.metodo_pago.value,
-            "fecha_pago":  datetime.now().isoformat(),
+            "estatus":           int(EstatusPago.PAGADO),
+            "metodo_pago":       body.metodo_pago.value,
+            "fecha_pago":        datetime.now().isoformat(),
             "notas_adicionales": body.notas,
         }).eq("idpago", idpago).execute()
     return {"ok": True, "cobrados": len(body.idpagos)}
@@ -573,21 +540,19 @@ async def guardar_formulario(
     body: FormularioTutor,
     db: Client = Depends(get_db),
 ):
-    """Endpoint público — el tutor llena el formulario desde el link enviado."""
     upd_al: dict = {}
-    if body.tipo_sangre:               upd_al["tipo_sangre"]   = body.tipo_sangre
-    if body.alergias:                  upd_al["alergias"]      = body.alergias
-    if body.padecimientos:             upd_al["padecimientos_cronicos"] = body.padecimientos
-    if body.seguro_medico:             upd_al["seguro_medico"] = body.seguro_medico
+    if body.tipo_sangre:                upd_al["tipo_sangre"]   = body.tipo_sangre
+    if body.alergias:                   upd_al["alergias"]      = body.alergias
+    if body.padecimientos:              upd_al["padecimientos_cronicos"] = body.padecimientos
+    if body.seguro_medico:              upd_al["seguro_medico"] = body.seguro_medico
     if body.contacto_emergencia_nombre: upd_al["contacto_emergencia_nombre"] = body.contacto_emergencia_nombre
-    if body.contacto_emergencia_tel:   upd_al["contacto_emergencia_tel"]    = body.contacto_emergencia_tel
-    if body.correo_tutor:              upd_al["correotutor"]       = body.correo_tutor
-    if body.telefono_tutor:            upd_al["telefonocontacto"]  = body.telefono_tutor
-    if body.nombre_tutor:              upd_al["nombretutor"]       = body.nombre_tutor
+    if body.contacto_emergencia_tel:    upd_al["contacto_emergencia_tel"]    = body.contacto_emergencia_tel
+    if body.correo_tutor:               upd_al["correotutor"]      = body.correo_tutor
+    if body.telefono_tutor:             upd_al["telefonocontacto"] = body.telefono_tutor
+    if body.nombre_tutor:               upd_al["nombretutor"]      = body.nombre_tutor
     if upd_al:
         db.table("alumnos").update(upd_al).eq("idalumno", body.idalumno).execute()
 
-    # Actualizar desglose del pago de inscripción correspondiente
     pagos = db.table("pagos").select("idpago, desglose_interno")\
         .eq("idalumno", body.idalumno)\
         .eq("id_tipo_pago", int(TipoPago.INSCRIPCION)).execute().data or []
@@ -614,7 +579,6 @@ async def subir_firma(
     body: SubirFormularioFirmado,
     db: Client = Depends(get_db),
 ):
-    """Endpoint público — el tutor sube la foto del formulario firmado."""
     r = db.table("pagos").select("idpago, desglose_interno")\
         .eq("idpago", body.idpago).execute()
     if not r.data:
@@ -626,8 +590,8 @@ async def subir_firma(
     d["firma_subida_en"]   = datetime.now().isoformat()
 
     db.table("pagos").update({
-        "desglose_interno": d,
-        "url_comprobante":  body.firma_url,
+        "desglose_interno":  d,
+        "url_comprobante":   body.firma_url,
         "notas_adicionales": body.notas,
     }).eq("idpago", body.idpago).execute()
     return {"ok": True, "mensaje": "Formulario firmado recibido. Pendiente de validación."}
@@ -680,7 +644,6 @@ async def notificar(
         raise HTTPException(400, "Sin correo ni teléfono del tutor. Actualiza los datos del alumno.")
 
     if body.tipo == "formulario":
-        # Buscar el pago de inscripción pendiente más reciente
         pago_insc = db.table("pagos").select("idpago").eq("idalumno", body.idalumno)\
             .eq("id_tipo_pago", int(TipoPago.INSCRIPCION))\
             .eq("estatus", int(EstatusPago.PENDIENTE))\
@@ -692,14 +655,12 @@ async def notificar(
             get_ciclo_actual().value, link,
         )
     else:
-        # Con idpago específico: busca ese pago directo (sin filtrar estatus)
         if body.idpago:
             p = db.table("pagos").select("*")\
                 .eq("idpago", body.idpago)\
                 .eq("idalumno", body.idalumno)\
                 .execute().data
         else:
-            # Sin idpago: busca el pendiente más reciente del alumno
             p = db.table("pagos").select("*")\
                 .eq("idalumno", body.idalumno)\
                 .eq("estatus", int(EstatusPago.PENDIENTE))\
@@ -741,10 +702,9 @@ async def notificar_lote(
             alumno  = _get_alumno(aid, db)
             escuela = _get_escuela(alumno["idescuela"], db)
             correo  = alumno.get("correotutor")
-            tel     = alumno.get("telefonocontacto")
             nombre  = f"{alumno['nombres']} {alumno['apellidopaterno']}"
 
-            if not correo and not tel:
+            if not correo:
                 resultados.append({"idalumno": aid, "error": "Sin contacto"}); continue
 
             p = db.table("pagos").select("*").eq("idalumno", aid)\
@@ -766,9 +726,9 @@ async def notificar_lote(
                 recargo=recargo,
             )
             resultados.append({
-                "idalumno":          aid,
+                "idalumno": aid,
                 "email_ok": result["email"],
-                "error":             result["error"],
+                "error":    result["error"],
             })
         except Exception as e:
             resultados.append({"idalumno": aid, "error": str(e)})
@@ -803,7 +763,7 @@ async def resumen_alumno(
     ), None)
 
     if insc:
-        d = insc.get("desglose_interno") or {}
+        d           = insc.get("desglose_interno") or {}
         form_status = d.get("formulario_status", "PENDIENTE")
         insc_status = "PAGADA" if insc["estatus"] == int(EstatusPago.PAGADO) else "PENDIENTE"
     else:
@@ -864,15 +824,10 @@ async def formularios_pendientes(
     ]
     return {"ok": True, "total": len(pendientes), "formularios": pendientes}
 
-# ─────────────────────────────────────────────────────────────
-#  HISTORIAL COMPLETO DE PAGOS POR ESCUELA
-#  GET /finanzas/pagos/escuela/{idescuela}/historial
-# ─────────────────────────────────────────────────────────────
 
 @router.get("/escuela/{idescuela}/historial")
 async def historial_pagos(
     idescuela:    int,
-    # ── Filtros ──────────────────────────────────────────
     estatus:      Optional[int]  = Query(None, description="0=Pendiente 1=Pagado"),
     id_tipo_pago: Optional[int]  = Query(None, description="1=Mensualidad 2=Inscripcion 3=Otro 4=Torneo"),
     metodo_pago:  Optional[str]  = Query(None, description="Efectivo|Transferencia|Tarjeta"),
@@ -880,10 +835,8 @@ async def historial_pagos(
     buscar:       Optional[str]  = Query(None, description="Nombre del alumno o concepto"),
     fecha_desde:  Optional[str]  = Query(None, description="YYYY-MM-DD"),
     fecha_hasta:  Optional[str]  = Query(None, description="YYYY-MM-DD"),
-    # ── Paginación ───────────────────────────────────────
     pagina:       int            = Query(1,  ge=1),
     por_pagina:   int            = Query(20, ge=1, le=100),
-    # ── Auth ─────────────────────────────────────────────
     user: dict   = Depends(get_current_user),
     db: Client   = Depends(get_db),
 ):
@@ -896,7 +849,6 @@ async def historial_pagos(
         "alumnos(nombres, apellidopaterno)"
     ).eq("idescuela", idescuela)
 
-    # ── Aplicar filtros ──────────────────────────────────
     if estatus is not None:
         q = q.eq("estatus", estatus)
     if id_tipo_pago is not None:
@@ -908,14 +860,11 @@ async def historial_pagos(
     if fecha_desde:
         q = q.gte("fecharegistro", fecha_desde)
     if fecha_hasta:
-        # incluir todo el día hasta
         q = q.lte("fecharegistro", f"{fecha_hasta}T23:59:59")
 
-    q = q.order("fecharegistro", desc=True)
-    r = q.execute()
-    todos = r.data or []
+    q     = q.order("fecharegistro", desc=True)
+    todos = q.execute().data or []
 
-    # ── Búsqueda por nombre/concepto (post-filter) ───────
     if buscar:
         buscar_lower = buscar.lower()
         todos = [
@@ -924,15 +873,11 @@ async def historial_pagos(
             or buscar_lower in f"{(p.get('alumnos') or {}).get('nombres', '')} {(p.get('alumnos') or {}).get('apellidopaterno', '')}".lower()
         ]
 
-    # ── Totales (antes de paginar) ───────────────────────
-    total          = len(todos)
-    total_monto    = sum(float(p.get("monto") or 0) for p in todos)
-    total_pagados  = sum(1 for p in todos if p.get("estatus") == int(EstatusPago.PAGADO))
+    total            = len(todos)
+    total_monto      = sum(float(p.get("monto") or 0) for p in todos)
+    total_pagados    = sum(1 for p in todos if p.get("estatus") == int(EstatusPago.PAGADO))
     total_pendientes = sum(1 for p in todos if p.get("estatus") == int(EstatusPago.PENDIENTE))
-
-    # ── Paginación ───────────────────────────────────────
-    offset = (pagina - 1) * por_pagina
-    pagina_data = todos[offset : offset + por_pagina]
+    offset           = (pagina - 1) * por_pagina
 
     return {
         "ok":               True,
@@ -942,15 +887,10 @@ async def historial_pagos(
         "total_pendientes": total_pendientes,
         "pagina":           pagina,
         "por_pagina":       por_pagina,
-        "paginas":          max(1, -(-total // por_pagina)),  # ceil division
-        "pagos":            pagina_data,
+        "paginas":          max(1, -(-total // por_pagina)),
+        "pagos":            todos[offset : offset + por_pagina],
     }
 
-
-# ─────────────────────────────────────────────────────────────
-#  PROFESOR — Pagos pendientes de sus alumnos
-#  GET /finanzas/pagos/profesor/pendientes
-# ─────────────────────────────────────────────────────────────
 
 @router.get("/profesor/pendientes")
 async def pendientes_profesor(
@@ -958,35 +898,26 @@ async def pendientes_profesor(
     user: dict = Depends(get_current_user),
     db: Client = Depends(get_db),
 ):
-    """
-    Devuelve los pagos pendientes SOLO de los alumnos asignados al profesor autenticado.
-    Mismo formato que /escuela/{id}/pendientes para reutilizar el mismo frontend.
-    """
     if user.get("rol") not in ROLES_STAFF:
         raise HTTPException(403, "Sin acceso")
     if user.get("rol") == "Escuela":
         raise HTTPException(403, "Este endpoint es exclusivo para profesores.")
 
-    id_usuario = user.get("idusuario")
-
-    # 1. Obtener idprofesor e idescuela del usuario autenticado
-    profe_res = db.table("profesores").select("idprofesor, idescuela")\
+    id_usuario  = user.get("idusuario")
+    profe_res   = db.table("profesores").select("idprofesor, idescuela")\
         .eq("idusuario", id_usuario).execute()
     if not profe_res.data:
         raise HTTPException(404, "Perfil de profesor no encontrado.")
 
-    idprofesor = profe_res.data[0]["idprofesor"]
-    idescuela  = profe_res.data[0]["idescuela"]
-
-    # 2. IDs de alumnos asignados a este profesor
+    idprofesor  = profe_res.data[0]["idprofesor"]
+    idescuela   = profe_res.data[0]["idescuela"]
     alumnos_res = db.table("alumnos").select("idalumno")\
         .eq("idprofesor", idprofesor).eq("estatus", 1).execute()
-    mis_ids = [a["idalumno"] for a in (alumnos_res.data or [])]
+    mis_ids     = [a["idalumno"] for a in (alumnos_res.data or [])]
 
     if not mis_ids:
         return {"ok": True, "total": 0, "pagos": [], "idprofesor": idprofesor, "idescuela": idescuela}
 
-    # 3. Pagos pendientes de esos alumnos
     q = db.table("pagos").select(
         "idpago, idalumno, idescuela, concepto, monto, folio_recibo, "
         "fecha_pago, id_tipo_pago, estatus, metodo_pago, desglose_interno, "
@@ -999,21 +930,14 @@ async def pendientes_profesor(
         q = q.eq("id_tipo_pago", tipo)
 
     r = q.order("fecha_pago").execute()
-    pagos = r.data or []
-
     return {
-        "ok":        True,
-        "total":     len(pagos),
-        "pagos":     pagos,
+        "ok":         True,
+        "total":      len(r.data or []),
+        "pagos":      r.data or [],
         "idprofesor": idprofesor,
         "idescuela":  idescuela,
     }
 
-
-# ─────────────────────────────────────────────────────────────
-#  PROFESOR — Historial de pagos de sus alumnos
-#  GET /finanzas/pagos/profesor/historial
-# ─────────────────────────────────────────────────────────────
 
 @router.get("/profesor/historial")
 async def historial_profesor(
@@ -1028,26 +952,20 @@ async def historial_profesor(
     user: dict = Depends(get_current_user),
     db: Client = Depends(get_db),
 ):
-    """
-    Historial completo de pagos de los alumnos del profesor.
-    Soporta los mismos filtros y paginación que /escuela/{id}/historial.
-    """
     if user.get("rol") not in ROLES_STAFF:
         raise HTTPException(403, "Sin acceso")
 
-    id_usuario = user.get("idusuario")
-
-    profe_res = db.table("profesores").select("idprofesor, idescuela")\
+    id_usuario  = user.get("idusuario")
+    profe_res   = db.table("profesores").select("idprofesor, idescuela")\
         .eq("idusuario", id_usuario).execute()
     if not profe_res.data:
         raise HTTPException(404, "Perfil de profesor no encontrado.")
 
-    idprofesor = profe_res.data[0]["idprofesor"]
-    idescuela  = profe_res.data[0]["idescuela"]
-
+    idprofesor  = profe_res.data[0]["idprofesor"]
+    idescuela   = profe_res.data[0]["idescuela"]
     alumnos_res = db.table("alumnos").select("idalumno")\
         .eq("idprofesor", idprofesor).execute()
-    mis_ids = [a["idalumno"] for a in (alumnos_res.data or [])]
+    mis_ids     = [a["idalumno"] for a in (alumnos_res.data or [])]
 
     if not mis_ids:
         return {
@@ -1074,11 +992,11 @@ async def historial_profesor(
     if fecha_hasta:
         q = q.lte("fecharegistro", f"{fecha_hasta}T23:59:59")
 
-    q = q.order("fecharegistro", desc=True)
+    q     = q.order("fecharegistro", desc=True)
     todos = q.execute().data or []
 
     if buscar:
-        bl = buscar.lower()
+        bl    = buscar.lower()
         todos = [
             p for p in todos
             if bl in (p.get("concepto") or "").lower()
