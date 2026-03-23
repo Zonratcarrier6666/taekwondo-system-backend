@@ -771,7 +771,7 @@ async def escanear_qr(
     user: dict   = Depends(get_current_user),
 ):
     _require_roles(user, ["Juez", "SuperAdmin", "Staff"])
-
+ 
     # ── 1. Buscar inscripción por token ──────────────────────
     insc_res = db.table("inscripciones_torneo").select(
         "idinscripcion, idtorneo, idcategoria, idescuela, idarea_asignada, "
@@ -782,7 +782,7 @@ async def escanear_qr(
         "torneo_categorias(nombre_categoria), "
         "torneos(nombre, tipo_torneo, max_combates_por_competidor)"
     ).eq("token_qr", token).execute()
-
+ 
     if not insc_res.data:
         return {
             "ok":      False,
@@ -790,16 +790,18 @@ async def escanear_qr(
             "estado":  "invalido",
             "mensaje": "QR inválido o no encontrado",
         }
-
+ 
     insc = insc_res.data[0]
     al   = insc.get("alumnos") or {}
     cg   = al.get("cintasgrados") or {}
     esc  = insc.get("datosescuela") or {}
     tor  = insc.get("torneos") or {}
     cat  = insc.get("torneo_categorias") or {}
-
-    nombre = f"{al.get('nombres', '')} {al.get('apellidopaterno', '')}".strip()
-
+ 
+    nombre        = f"{al.get('nombres', '')} {al.get('apellidopaterno', '')}".strip()
+    idinscripcion = insc["idinscripcion"]
+    idtorneo_insc = insc["idtorneo"]
+ 
     # ── 2. ¿Hizo check-in? ───────────────────────────────────
     if not insc.get("estatus_checkin"):
         return {
@@ -807,16 +809,13 @@ async def escanear_qr(
             "valido":        False,
             "estado":        "sin_checkin",
             "nombre_alumno": nombre,
-            "mensaje":       "⚠️ Este competidor no ha hecho check-in",
+            "mensaje":       f"⚠️ {nombre} no ha hecho check-in. Dirígelo a la ventanilla.",
         }
-
+ 
     # ── 3. ¿QR ya usado (eliminado / descalificado)? ─────────
     if insc.get("qr_usado"):
         lugar = insc.get("lugar_obtenido")
-        if lugar:
-            msg = f"🏅 Competidor finalizó en {lugar}° lugar"
-        else:
-            msg = "🚫 Competidor eliminado o descalificado"
+        msg   = f"🏅 {nombre} finalizó en {lugar}° lugar" if lugar else f"🚫 {nombre} fue eliminado o descalificado"
         return {
             "ok":             False,
             "valido":         False,
@@ -825,113 +824,121 @@ async def escanear_qr(
             "mensaje":        msg,
             "lugar_obtenido": lugar,
         }
-
+ 
     # ── 4. Modalidad local: límite de combates ───────────────
     tipo_torneo    = tor.get("tipo_torneo", "competencia")
     max_combates   = tor.get("max_combates_por_competidor", 3)
-    num_realizados = insc.get("num_combates_realizados", 0)
-
+    num_realizados = insc.get("num_combates_realizados", 0) or 0
+ 
     if tipo_torneo == "local" and num_realizados >= max_combates:
         return {
-            "ok":            False,
-            "valido":        False,
-            "estado":        "limite_combates",
-            "nombre_alumno": nombre,
-            "mensaje":       f"⚠️ Competidor alcanzó el límite de {max_combates} combates",
+            "ok":                     False,
+            "valido":                 False,
+            "estado":                 "limite_combates",
+            "nombre_alumno":          nombre,
+            "mensaje":                f"⚠️ {nombre} alcanzó el límite de {max_combates} combates",
             "num_combates_realizados": num_realizados,
         }
-
-    # ── 5. Verificar área ────────────────────────────────────
-    area_asignada        = insc.get("idarea_asignada")
-    en_area_correcta     = True
-    nombre_area_correcta = None
-    nombre_area_actual   = None
-
-    if idarea and area_asignada and idarea != area_asignada:
-        en_area_correcta = False
+ 
+    # ── 5. Verificar que pertenece a ESTA área ───────────────
+    #  Si idarea_asignada está seteado y no coincide → área incorrecta
+    area_asignada = insc.get("idarea_asignada")
+ 
+    if idarea and area_asignada and int(area_asignada) != int(idarea):
+        # Obtener nombres de ambas áreas
         area_correcta_res = db.table("areas_combate").select("nombre_area")\
             .eq("idarea", area_asignada).execute()
         area_actual_res   = db.table("areas_combate").select("nombre_area")\
             .eq("idarea", idarea).execute()
+ 
         nombre_area_correcta = (area_correcta_res.data[0]["nombre_area"]
                                 if area_correcta_res.data else f"Área {area_asignada}")
         nombre_area_actual   = (area_actual_res.data[0]["nombre_area"]
                                 if area_actual_res.data else f"Área {idarea}")
-
-    # ── 6. Buscar combate activo del competidor ──────────────
-    combate_activo = None
-    if idarea:
-        idinscripcion = insc["idinscripcion"]
-        idtorneo_insc = insc["idtorneo"]
-        
-        print(f"[DEBUG] Buscando combate: idinscripcion={idinscripcion}, idtorneo={idtorneo_insc}, idarea={idarea}")
-
-
-        c_res = db.table("combates").select(
-            "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
-        ).eq("idtorneo", idtorneo_insc).eq("estatus", "pendiente")\
-         .eq("idarea", idarea).execute()
-        print(f"[DEBUG] Resultado query combate: {c_res.data}")
-        for c in c_res.data or []:
-            if int(c.get("id_competidor_1") or 0) == idinscripcion or \
-               int(c.get("id_competidor_2") or 0) == idinscripcion:
-                combate_activo = c
-                break
-
-        if not combate_activo:
-            c_res2 = db.table("combates").select(
-                "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
-            ).eq("idtorneo", idtorneo_insc).eq("estatus", "pendiente")\
-             .is_("idarea", "null").execute()
-
-            for c in c_res2.data or []:
-                if int(c.get("id_competidor_1") or 0) == idinscripcion or \
-                   int(c.get("id_competidor_2") or 0) == idinscripcion:
-                    combate_activo = c
-                    db.table("combates").update({"idarea": idarea})\
-                        .eq("idcombate", c["idcombate"]).execute()
-                    combate_activo["idarea"] = idarea
-                    break
-                
-            print(f"[DEBUG] combate_activo={combate_activo}")
-    # ── 7. Armar datos del competidor para la pantalla ───────
-    datos_competidor = {
-        "idinscripcion":          insc["idinscripcion"],
-        "nombre_alumno":          nombre,
-        "foto":                   al.get("fotoalumno"),
-        "edad":                   _calcular_edad(al.get("fechanacimiento", "")),
-        "cinta":                  cg.get("nivelkupdan", ""),
-        "color_cinta":            cg.get("color", ""),
-        "escuela":                esc.get("nombreescuela", ""),
-        "categoria":              cat.get("nombre_categoria", ""),
-        "torneo":                 tor.get("nombre", ""),
-        "num_combates_realizados": num_realizados,
-        "tipo_torneo":            tipo_torneo,
-        "max_combates":           max_combates if tipo_torneo == "local" else None,
-        "combate_activo":         combate_activo,
-    }
-
-    # ── 8. Respuesta según área ──────────────────────────────
-    if not en_area_correcta:
+ 
         return {
             "ok":              True,
             "valido":          False,
             "estado":          "area_incorrecta",
             "nombre_alumno":   nombre,
-            "mensaje":         f"⚠️ {nombre} no pertenece a esta área. Su combate es en: {nombre_area_correcta}",
+            "mensaje":         f"⚠️ {nombre} no es de esta área. Su combate es en: {nombre_area_correcta}",
             "area_correcta":   nombre_area_correcta,
-            "idarea_correcta": area_asignada,
+            "idarea_correcta": int(area_asignada),
             "area_escaneada":  nombre_area_actual,
-            "competidor":      datos_competidor,
         }
-
+ 
+    # ── 6. Buscar combate asignado al competidor ─────────────
+    #  Buscar primero en el área actual, luego sin área asignada
+    combate_activo = None
+ 
+    if idarea:
+        # Buscar combate en el área donde está el juez
+        c_res = db.table("combates").select(
+            "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
+        ).eq("idtorneo", idtorneo_insc)\
+         .eq("estatus", "pendiente")\
+         .eq("idarea", int(idarea))\
+         .execute()
+ 
+        for c in c_res.data or []:
+            c1 = int(c.get("id_competidor_1") or 0)
+            c2 = int(c.get("id_competidor_2") or 0)
+            if c1 == idinscripcion or c2 == idinscripcion:
+                combate_activo = c
+                break
+ 
+        # Si no hay combate en el área, buscar sin área asignada y asignarlo
+        if not combate_activo:
+            c_res2 = db.table("combates").select(
+                "idcombate, id_competidor_1, id_competidor_2, ronda, estatus, idarea"
+            ).eq("idtorneo", idtorneo_insc)\
+             .eq("estatus", "pendiente")\
+             .is_("idarea", "null")\
+             .execute()
+ 
+            for c in c_res2.data or []:
+                c1 = int(c.get("id_competidor_1") or 0)
+                c2 = int(c.get("id_competidor_2") or 0)
+                if c1 == idinscripcion or c2 == idinscripcion:
+                    # Asignar el combate a esta área
+                    db.table("combates").update({"idarea": int(idarea)})\
+                        .eq("idcombate", c["idcombate"]).execute()
+                    c["idarea"] = int(idarea)
+                    combate_activo = c
+                    # También actualizar idarea_asignada en ambas inscripciones
+                    for comp_id in [c1, c2]:
+                        if comp_id:
+                            db.table("inscripciones_torneo")\
+                                .update({"idarea_asignada": int(idarea)})\
+                                .eq("idinscripcion", comp_id).execute()
+                    break
+ 
+    # ── 7. Armar datos del competidor ────────────────────────
+    datos_competidor = {
+        "idinscripcion":           idinscripcion,
+        "nombre_alumno":           nombre,
+        "foto":                    al.get("fotoalumno"),
+        "edad":                    _calcular_edad(al.get("fechanacimiento", "")),
+        "cinta":                   cg.get("nivelkupdan", ""),
+        "color_cinta":             cg.get("color", ""),
+        "escuela":                 esc.get("nombreescuela", ""),
+        "categoria":               cat.get("nombre_categoria", ""),
+        "torneo":                  tor.get("nombre", ""),
+        "num_combates_realizados": num_realizados,
+        "tipo_torneo":             tipo_torneo,
+        "max_combates":            max_combates if tipo_torneo == "local" else None,
+        "combate_activo":          combate_activo,
+    }
+ 
+    # ── 8. Respuesta: competidor validado y listo ─────────────
     return {
-        "ok":        True,
-        "valido":    True,
-        "estado":    "listo",
-        "mensaje":   f"✅ {nombre} — verificado. Puede iniciar el combate.",
+        "ok":         True,
+        "valido":     True,
+        "estado":     "listo",
+        "mensaje":    f"✅ {nombre} — verificado.",
         "competidor": datos_competidor,
     }
+
 
 
 @router.post("/qr/invalidar/{idinscripcion}",
