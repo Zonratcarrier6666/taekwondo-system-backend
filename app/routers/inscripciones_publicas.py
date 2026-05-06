@@ -168,9 +168,22 @@ async def registrar_alumno(
     nuevo         = result.data[0]
     nuevo_id      = nuevo["idalumno"]
     from datetime import date
-    fecha_hoy     = date.today()
-    dia_cobro     = fecha_hoy.day
-    mes_str       = fecha_hoy.strftime("%Y-%m")
+    import calendar
+    fecha_hoy = date.today()
+    dia_cobro = fecha_hoy.day
+
+    # La primera mensualidad vence el mes SIGUIENTE al de inscripción.
+    # Ej: inscripción el 5 de mayo → primer cobro el 5 de junio.
+    if fecha_hoy.month == 12:
+        anio_cobro = fecha_hoy.year + 1
+        mes_cobro  = 1
+    else:
+        anio_cobro = fecha_hoy.year
+        mes_cobro  = fecha_hoy.month + 1
+
+    # Ajustar si el mes siguiente tiene menos días (ej: día 31 → febrero tiene 28)
+    dia_real = min(dia_cobro, calendar.monthrange(anio_cobro, mes_cobro)[1])
+    mes_str  = f"{anio_cobro}-{mes_cobro:02d}"
 
     # ── 1. Guardar dia_cobro y monto en config_json de la escuela ──
     try:
@@ -195,10 +208,10 @@ async def registrar_alumno(
         recargo = 50.0
         gracia  = 5
 
-    # ── 2. Generar primer cargo de mensualidad del mes actual ──────
+    # ── 2. Generar primer cargo de mensualidad (vence el mes siguiente) ───────
     primer_cargo_ok = False
     try:
-        fecha_venc = str(date(fecha_hoy.year, fecha_hoy.month, min(dia_cobro, 28)))
+        fecha_venc = str(date(anio_cobro, mes_cobro, dia_real))
         db.table("pagos").insert({
             "idalumno":     nuevo_id,
             "idescuela":    idescuela,
