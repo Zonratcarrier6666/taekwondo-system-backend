@@ -1,29 +1,41 @@
-# utils/email_utils.py (o un archivo similar)
 import os
-import resend
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Dict, Any
+from dotenv import load_dotenv
 
-# Carga la key desde env (Render la provee)
-resend.api_key = os.getenv("RESEND_API_KEY")
+load_dotenv()
 
 def send_resend_email(
     to: str | list[str],
     subject: str,
     html: str,
-    from_email: str = "Taekwondo System <onboarding@resend.dev>",  # Temporal, cámbialo después
+    from_email: str = "TKW Sistema <tkdsystem1@gmail.com>",
 ) -> Dict[str, Any]:
-    if not resend.api_key:
-        return {"error": "RESEND_API_KEY no está configurada en env vars"}
+    
+    EMAIL_USER = os.getenv("EMAIL_USER")  # ← adentro de la función
+    EMAIL_PASS = os.getenv("EMAIL_PASS")  # ← adentro de la función
+    
+    print("USER:", EMAIL_USER)
+    print("PASS:", EMAIL_PASS)  # ← confirma que ya es la nueva
 
-    params = {
-        "from": from_email,
-        "to": [to] if isinstance(to, str) else to,
-        "subject": subject,
-        "html": html,
-    }
+    if not EMAIL_USER or not EMAIL_PASS:
+        return {"error": "EMAIL_USER o EMAIL_PASS no configurados en env vars"}
+
+    destinatarios = [to] if isinstance(to, str) else to
 
     try:
-        response = resend.Emails.send(params)
-        return {"success": True, "id": response["id"]}
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = from_email
+        msg["To"]      = ", ".join(destinatarios)
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.sendmail(EMAIL_USER, destinatarios, msg.as_string())
+
+        return {"success": True, "id": None}
     except Exception as e:
         return {"error": str(e)}
