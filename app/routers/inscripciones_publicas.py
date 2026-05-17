@@ -92,10 +92,10 @@ class InscripcionPayload(BaseModel):
     contacto_emergencia_nombre: Optional[str] = None
     contacto_emergencia_tel:    Optional[str] = None
 
-    # Escolar
+    # Escola
     grado_escolar:      Optional[str]   = None
     escuela_procedencia: Optional[str]  = None
-
+    idprofesor: Optional[int] = None
     # Foto: se sube por separado via POST /{slug}/foto/{idalumno}
 
 
@@ -139,6 +139,7 @@ async def registrar_alumno(
 
     alumno = {
         "idescuela":                idescuela,
+        "idprofesor":  payload.idprofesor or None,
         "nombres":                  payload.nombres.strip(),
         "apellidopaterno":          payload.apellidopaterno.strip(),
         "apellidomaterno":          payload.apellidomaterno,
@@ -238,13 +239,14 @@ async def registrar_alumno(
         print(f"[INSCRIPCION] Error generando cargo mensualidad alumno {nuevo_id}: {e}")
 
     return {
-        "message":              "Alumno registrado exitosamente",
-        "idalumno":             nuevo_id,
-        "nombres":              nuevo["nombres"],
-        "apellidos":            f"{nuevo['apellidopaterno']} {nuevo.get('apellidomaterno','') or ''}".strip(),
-        "dia_cobro":            dia_cobro,
-        "primer_cargo_mes":     mes_str,
-        "primer_cargo_generado": primer_cargo_ok,
+        "message":               "Alumno registrado exitosamente",
+    "idalumno":              nuevo_id,
+    "nombres":               nuevo["nombres"],
+    "apellidos":             f"{nuevo['apellidopaterno']} {nuevo.get('apellidomaterno','') or ''}".strip(),
+    "idprofesor":            payload.idprofesor or None,   # ← agregar esta línea
+    "dia_cobro":             dia_cobro,
+    "primer_cargo_mes":      mes_str,
+    "primer_cargo_generado": primer_cargo_ok,
     }
 
 
